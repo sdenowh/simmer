@@ -338,6 +338,10 @@ class SimulatorService: ObservableObject {
                     print("Created snapshots directory")
                 }
                 
+                // Create the snapshot directory first
+                try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
+                print("Created snapshot directory: \(snapshotPath)")
+                
                 // Copy Documents directory contents, excluding any existing Snapshots directory
                 let documentsContents = try FileManager.default.contentsOfDirectory(atPath: app.documentsPath)
                 for item in documentsContents {
