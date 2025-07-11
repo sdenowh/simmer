@@ -28,80 +28,97 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(PlainButtonStyle())
+                
+#if DEBUG
+                Button(action: {
+                    simulatorService.testProgressBar()
+                }) {
+                    Image(systemName: "play.circle")
+                        .foregroundColor(.green)
+                }
+                .buttonStyle(PlainButtonStyle())
+#endif
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
             
             Divider()
             
-            // Progress Bar for Snapshot Operations
-            if simulatorService.isSnapshotOperationInProgress {
-                VStack(spacing: 8) {
-                    Text(simulatorService.snapshotOperationMessage)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                    
-                    ProgressView(value: simulatorService.snapshotOperationProgress)
-                        .progressViewStyle(LinearProgressViewStyle())
-                        .scaleEffect(y: 0.5)
-                    
-                    Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
-                
-                Divider()
-            }
-            
             // Content
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(simulatorService.simulators) { simulator in
-                        SimulatorRowView(
-                            simulator: simulator,
-                            isSelected: selectedSimulator?.id == simulator.id,
-                            onTap: {
-                                if selectedSimulator?.id == simulator.id {
-                                    selectedSimulator = nil
-                                    selectedApp = nil
-                                } else {
-                                    selectedSimulator = simulator
-                                    selectedApp = nil
-                                    simulatorService.loadApps(for: simulator)
-                                }
-                            },
-                            simulatorService: simulatorService
-                        )
-                        
-                        if selectedSimulator?.id == simulator.id {
-                            ForEach(simulatorService.apps) { app in
-                                AppRowView(
-                                    app: app,
-                                    isSelected: selectedApp?.id == app.id,
-                                    onTap: {
-                                        if selectedApp?.id == app.id {
-                                            selectedApp = nil
-                                        } else {
-                                            selectedApp = app
-                                            simulatorService.loadSnapshots(for: app)
-                                        }
+            ZStack {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(simulatorService.simulators) { simulator in
+                            SimulatorRowView(
+                                simulator: simulator,
+                                isSelected: selectedSimulator?.id == simulator.id,
+                                onTap: {
+                                    if selectedSimulator?.id == simulator.id {
+                                        selectedSimulator = nil
+                                        selectedApp = nil
+                                    } else {
+                                        selectedSimulator = simulator
+                                        selectedApp = nil
+                                        simulatorService.loadApps(for: simulator)
                                     }
-                                )
-                                
-                                if selectedApp?.id == app.id {
-                                    AppActionsView(app: app, simulatorService: simulatorService)
+                                },
+                                simulatorService: simulatorService
+                            )
+                            
+                            if selectedSimulator?.id == simulator.id {
+                                ForEach(simulatorService.apps) { app in
+                                    AppRowView(
+                                        app: app,
+                                        isSelected: selectedApp?.id == app.id,
+                                        onTap: {
+                                            if selectedApp?.id == app.id {
+                                                selectedApp = nil
+                                            } else {
+                                                selectedApp = app
+                                                simulatorService.loadSnapshots(for: app)
+                                            }
+                                        }
+                                    )
+                                    
+                                    if selectedApp?.id == app.id {
+                                        AppActionsView(app: app, simulatorService: simulatorService)
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                
+                            // Progress Bar Overlay for Snapshot Operations
+            if simulatorService.isSnapshotOperationInProgress {
+                VStack {
+                    Spacer()
+                    
+                    VStack(spacing: 4) {
+                        Text(simulatorService.snapshotOperationMessage)
+                            .font(.system(size: 10))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                        
+                        ProgressView(value: simulatorService.snapshotOperationProgress)
+                            .progressViewStyle(LinearProgressViewStyle(tint: .white))
+                            .scaleEffect(y: 0.8)
+                        
+                        Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
+                            .font(.system(size: 9))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(
+                        VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+                    )
+                }
+                .allowsHitTesting(false)
             }
+            }
+            .frame(width: 300, height: 400)
         }
-        .frame(width: 300, height: 400)
     }
 }
 
@@ -440,6 +457,29 @@ struct RestoreConfirmationView: View {
         }
         .padding(24)
         .frame(width: 300)
+    }
+}
+
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode) {
+        self.material = material
+        self.blendingMode = blendingMode
+    }
+    
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let visualEffectView = NSVisualEffectView()
+        visualEffectView.material = material
+        visualEffectView.blendingMode = blendingMode
+        visualEffectView.state = .active
+        return visualEffectView
+    }
+    
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
     }
 }
 

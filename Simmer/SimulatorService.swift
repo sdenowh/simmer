@@ -790,4 +790,45 @@ class SimulatorService: ObservableObject {
             loadSnapshots(for: selectedApp)
         }
     }
+    
+    func testProgressBar() {
+        // Start progress tracking
+        DispatchQueue.main.async {
+            self.isSnapshotOperationInProgress = true
+            self.snapshotOperationProgress = 0.0
+            self.snapshotOperationMessage = "Testing progress bar..."
+        }
+        
+        // Simulate progress over 3 seconds
+        DispatchQueue.global(qos: .userInitiated).async {
+            for i in 1...30 {
+                DispatchQueue.main.async {
+                    self.snapshotOperationProgress = Double(i) / 30.0
+                    
+                    // Update message based on progress
+                    if i <= 10 {
+                        self.snapshotOperationMessage = "Preparing test operation..."
+                    } else if i <= 20 {
+                        self.snapshotOperationMessage = "Processing test data..."
+                    } else {
+                        self.snapshotOperationMessage = "Finalizing test..."
+                    }
+                }
+                
+                Thread.sleep(forTimeInterval: 0.1) // 100ms delay between updates
+            }
+            
+            DispatchQueue.main.async {
+                self.snapshotOperationProgress = 1.0
+                self.snapshotOperationMessage = "Test completed successfully!"
+                
+                // Reset after 2 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.isSnapshotOperationInProgress = false
+                    self.snapshotOperationProgress = 0.0
+                    self.snapshotOperationMessage = ""
+                }
+            }
+        }
+    }
 } 
