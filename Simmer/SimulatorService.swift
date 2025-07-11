@@ -167,7 +167,7 @@ class SimulatorService: ObservableObject {
                                                 let dataBundleId = metadata["MCMMetadataIdentifier"] as? String ?? ""
                                                 if dataBundleId == bundleIdentifier {
                                                     documentsPath = "\(dataAppPath)/Documents"
-                                                    snapshotsPath = "\(dataAppPath)/Documents/Snapshots"
+                                                    snapshotsPath = "\(dataAppPath)/Snapshots"
                                                     print("Found data container for \(appName)")
                                                     break
                                                 }
@@ -242,6 +242,11 @@ class SimulatorService: ObservableObject {
     private func getSnapshots(for app: App) -> [Snapshot] {
         var snapshots: [Snapshot] = []
         
+        // Check if snapshots directory exists
+        guard FileManager.default.fileExists(atPath: app.snapshotsPath) else {
+            return snapshots
+        }
+        
         do {
             let snapshotDirectories = try FileManager.default.contentsOfDirectory(atPath: app.snapshotsPath)
             
@@ -313,9 +318,33 @@ class SimulatorService: ObservableObject {
         let snapshotName = "snapshot_\(timestamp)"
         let snapshotPath = "\(app.snapshotsPath)/\(snapshotName)"
         
+        print("Taking snapshot for \(app.name)")
+        print("Documents path: \(app.documentsPath)")
+        print("Snapshots path: \(app.snapshotsPath)")
+        print("Snapshot path: \(snapshotPath)")
+        
         do {
-            try FileManager.default.copyItem(atPath: app.documentsPath, toPath: snapshotPath)
-            loadSnapshots(for: app)
+            // Check if Documents directory exists
+            let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
+            print("Documents directory exists: \(documentsExists)")
+            
+            if documentsExists {
+                // Create Snapshots directory if it doesn't exist
+                let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
+                print("Snapshots directory exists: \(snapshotsExists)")
+                
+                if !snapshotsExists {
+                    try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
+                    print("Created snapshots directory")
+                }
+                
+                // Copy the entire Documents directory
+                try FileManager.default.copyItem(atPath: app.documentsPath, toPath: snapshotPath)
+                loadSnapshots(for: app)
+                print("Snapshot created successfully: \(snapshotName)")
+            } else {
+                print("Documents directory does not exist for \(app.name)")
+            }
         } catch {
             print("Error taking snapshot: \(error)")
         }
