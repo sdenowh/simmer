@@ -7,6 +7,10 @@
 
 import SwiftUI
 
+#if os(macOS)
+import AppKit
+#endif
+
 struct ContentView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var simulatorService: SimulatorService
@@ -103,7 +107,7 @@ struct ContentView: View {
                                             }
                                         }
                                     )
-                                    
+
                                     if selectedApp?.id == app.id {
                                         AppActionsView(app: app, simulatorService: simulatorService)
                                     }
@@ -150,6 +154,20 @@ struct ContentView: View {
         }
     }
 }
+
+#if os(macOS)
+private func maskedAppIcon(from image: NSImage, cornerRadius: CGFloat = 16) -> NSImage {
+    let size = image.size
+    let rect = NSRect(origin: .zero, size: size)
+    let newImage = NSImage(size: size)
+    newImage.lockFocus()
+    let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+    path.addClip()
+    image.draw(in: rect)
+    newImage.unlockFocus()
+    return newImage
+}
+#endif
 
 struct SimulatorRowView: View {
     let simulator: Simulator
@@ -237,6 +255,8 @@ struct AppRowView: View {
             .padding(.vertical, 6)
             .padding(.leading, 20)
             .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+            .contentShape(Rectangle())
+
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -368,7 +388,7 @@ struct SnapshotRowView: View {
     let snapshot: Snapshot
     let app: App
     @ObservedObject var simulatorService: SimulatorService
-    @State private var showingRestoreConfirmation = false
+    @EnvironmentObject var popoverWindowProvider: PopoverWindowProvider
     
     private var currentApp: App? {
         simulatorService.apps.first { $0.id == app.id }
@@ -385,7 +405,7 @@ struct SnapshotRowView: View {
     var body: some View {
         HStack {
             Button(action: {
-                showingRestoreConfirmation = true
+                showRestoreConfirmation()
             }) {
                 HStack {
                     Image(systemName: "arrow.clockwise")
@@ -430,62 +450,29 @@ struct SnapshotRowView: View {
             .buttonStyle(PlainButtonStyle())
             .padding(.trailing, 8)
         }
-        .sheet(isPresented: $showingRestoreConfirmation) {
-            RestoreConfirmationView(
-                snapshot: snapshot,
-                app: displayApp,
-                simulatorService: simulatorService,
-                isPresented: $showingRestoreConfirmation
-            )
-        }
     }
-}
-
-struct RestoreConfirmationView: View {
-    let snapshot: Snapshot
-    let app: App
-    @ObservedObject var simulatorService: SimulatorService
-    @Binding var isPresented: Bool
     
-    var body: some View {
-        VStack(spacing: 16) {
-            // App icon
-            if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
-                Image(nsImage: image)
-                    .resizable()
-                    .frame(width: 64, height: 64)
-                    .cornerRadius(12)
-            } else {
-                Image(systemName: "app")
-                    .foregroundColor(.gray)
-                    .frame(width: 64, height: 64)
-                    .font(.system(size: 32))
-            }
-            
-            Text("Restore Snapshot")
-                .font(.headline)
-            
-            Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
-                .font(.system(size: 14))
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-            
-            HStack(spacing: 12) {
-                Button("Cancel") {
-                    isPresented = false
-                }
-                .buttonStyle(.bordered)
-                
-                Button("Restore") {
-                    simulatorService.restoreSnapshot(snapshot, for: app)
-                    isPresented = false
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
+    private func showRestoreConfirmation() {
+        guard let window = popoverWindowProvider.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Restore Snapshot"
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        let formattedDate = dateFormatter.string(from: snapshot.date)
+        alert.informativeText = "This will replace the current Documents folder with the snapshot from \(formattedDate). This action cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+        #if os(macOS)
+        if let iconPath = displayApp.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+            alert.icon = maskedAppIcon(from: image, cornerRadius: 16)
+        }
+        #endif
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                simulatorService.restoreSnapshot(snapshot, for: displayApp)
             }
         }
-        .padding(24)
-        .frame(width: 300)
     }
 }
 
