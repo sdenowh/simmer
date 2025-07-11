@@ -181,6 +181,19 @@ struct AppActionsView: View {
         simulatorService.apps.first { $0.id == app.id }
     }
     
+    private var displayApp: App {
+        if let currentApp = currentApp {
+            return currentApp
+        } else {
+            // If we don't have a current app yet, show loading state if documents path exists
+            var displayApp = app
+            if !app.documentsPath.isEmpty {
+                displayApp.startLoadingDocumentsSize()
+            }
+            return displayApp
+        }
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Show Documents Folder
@@ -198,12 +211,12 @@ struct AppActionsView: View {
                     
                     Spacer()
                     
-                    if let currentApp = currentApp, currentApp.isLoadingDocumentsSize {
+                    if displayApp.isLoadingDocumentsSize {
                         ProgressView()
                             .scaleEffect(0.4)
                             .frame(width: 8, height: 8)
                     } else {
-                        Text(DirectorySize(size: currentApp?.documentsSize ?? 0).formattedSize)
+                        Text(DirectorySize(size: displayApp.documentsSize).formattedSize)
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }

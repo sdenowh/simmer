@@ -70,6 +70,20 @@ class SimulatorService: ObservableObject {
     func loadSnapshots(for app: App) {
         snapshots = getSnapshots(for: app)
         selectedApp = app
+        
+        // Ensure the app is in the apps array and has loading state set
+        if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
+            if !apps[appIndex].isLoadingDocumentsSize && apps[appIndex].documentsSize == 0 && !apps[appIndex].documentsPath.isEmpty {
+                apps[appIndex].startLoadingDocumentsSize()
+                calculateDocumentsSize(for: apps[appIndex]) { calculatedSize in
+                    DispatchQueue.main.async {
+                        if let updatedAppIndex = self.apps.firstIndex(where: { $0.id == app.id }) {
+                            self.apps[updatedAppIndex].finishLoadingDocumentsSize(calculatedSize)
+                        }
+                    }
+                }
+            }
+        }
     }
     
     private func getAvailableSimulators() -> [Simulator] {
