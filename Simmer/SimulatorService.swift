@@ -60,7 +60,10 @@ class SimulatorService: ObservableObject {
                         dataPath: devicePath
                     )
                     
-                    simulators.append(simulator)
+                    // Only include simulators that have apps installed
+                    if hasAppsInstalled(simulator: simulator) {
+                        simulators.append(simulator)
+                    }
                 }
             }
         } catch {
@@ -68,6 +71,28 @@ class SimulatorService: ObservableObject {
         }
         
         return simulators.sorted { $0.name < $1.name }
+    }
+    
+    private func hasAppsInstalled(simulator: Simulator) -> Bool {
+        let containersPath = "\(simulator.dataPath)/data/Containers"
+        
+        // Check if Containers directory exists
+        guard FileManager.default.fileExists(atPath: containersPath) else {
+            return false
+        }
+        
+        // Check if Bundle/Application directory exists and has content
+        let bundlePath = "\(containersPath)/Bundle/Application"
+        guard FileManager.default.fileExists(atPath: bundlePath) else {
+            return false
+        }
+        
+        do {
+            let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
+            return !bundleDirectories.isEmpty
+        } catch {
+            return false
+        }
     }
     
     private func getDeviceType(from deviceTypeString: String) -> Simulator.DeviceType {
