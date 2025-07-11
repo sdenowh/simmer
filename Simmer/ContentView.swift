@@ -36,9 +36,6 @@ struct ContentView: View {
                     .foregroundColor(.blue)
                 Text("Simmer")
                     .font(.headline)
-                Text("(\(appState.popoverAppearanceCount))")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 Spacer()
                 
                 Menu {
