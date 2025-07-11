@@ -32,6 +32,28 @@ class SimulatorService: ObservableObject {
         var simulators = getAvailableSimulators()
         loadPinnedState(&simulators)
         self.simulators = sortSimulators(simulators)
+        
+        // Debug: Log simulator information
+        print("=== Simulator Debug Info ===")
+        print("Found \(simulators.count) simulators")
+        for simulator in simulators {
+            print("Simulator: \(simulator.name) (\(simulator.iOSVersion))")
+            print("  Data Path: \(simulator.dataPath)")
+            print("  Bundle Path: \(simulator.dataPath)/data/Containers/Bundle/Application")
+            
+            let bundlePath = "\(simulator.dataPath)/data/Containers/Bundle/Application"
+            if FileManager.default.fileExists(atPath: bundlePath) {
+                do {
+                    let bundleContents = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
+                    print("  Bundle Contents: \(bundleContents.count) items")
+                } catch {
+                    print("  Error reading bundle contents: \(error)")
+                }
+            } else {
+                print("  Bundle path does not exist")
+            }
+            print("---")
+        }
     }
     
     func togglePin(for simulator: Simulator) {
@@ -284,18 +306,40 @@ class SimulatorService: ObservableObject {
     
     private func getAppIconPath(for bundleIdentifier: String, in simulator: Simulator) -> String? {
         let bundlePath = "\(simulator.dataPath)/data/Containers/Bundle/Application"
+        
+        // Check if the bundle path exists
+        guard FileManager.default.fileExists(atPath: bundlePath) else {
+            print("Bundle path does not exist: \(bundlePath)")
+            return nil
+        }
+        
         do {
             let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
             for bundleDir in bundleDirectories {
                 let appPath = "\(bundlePath)/\(bundleDir)"
+                
+                // Check if app path exists
+                guard FileManager.default.fileExists(atPath: appPath) else {
+                    continue
+                }
+                
                 let appBundleContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
                 for item in appBundleContents {
                     if item.hasSuffix(".app") {
                         let appBundlePath = "\(appPath)/\(item)"
                         let infoPlistPath = "\(appBundlePath)/Info.plist"
+                        
+                        // Check if Info.plist exists
+                        guard FileManager.default.fileExists(atPath: infoPlistPath) else {
+                            print("Info.plist not found at: \(infoPlistPath)")
+                            continue
+                        }
+                        
                         if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
                             let bundleId = infoPlist["CFBundleIdentifier"] as? String
                             if bundleId == bundleIdentifier {
+                                print("Found matching bundle for \(bundleIdentifier) at: \(appBundlePath)")
+                                
                                 // Try iPhone icons
                                 if let icons = infoPlist["CFBundleIcons"] as? [String: Any],
                                    let primaryIcon = icons["CFBundlePrimaryIcon"] as? [String: Any],
@@ -313,6 +357,7 @@ class SimulatorService: ObservableObject {
                                         }
                                     }
                                 }
+                                
                                 // Try iPad icons
                                 if let iconsIpad = infoPlist["CFBundleIcons~ipad"] as? [String: Any],
                                    let primaryIconIpad = iconsIpad["CFBundlePrimaryIcon"] as? [String: Any],
@@ -330,6 +375,7 @@ class SimulatorService: ObservableObject {
                                         }
                                     }
                                 }
+                                
                                 // Fallback: scan for any AppIcon*.png
                                 if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
                                     for file in bundleContents {
@@ -340,7 +386,31 @@ class SimulatorService: ObservableObject {
                                         }
                                     }
                                 }
+                                
+                                // Additional fallback: scan for any .png files that might be icons
+                                if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
+                                    for file in bundleContents {
+                                        if file.hasSuffix(".png") && (file.contains("Icon") || file.contains("icon")) {
+                                            let iconPath = "\(appBundlePath)/\(file)"
+                                            print("Found app icon (additional fallback): \(iconPath)")
+                                            return iconPath
+                                        }
+                                    }
+                                }
+                                
+                                print("No icon files found for bundle: \(bundleIdentifier)")
+                                
+                                // Final fallback: try to get icon from system app store
+                                let systemIconPath = self.getSystemAppIcon(for: bundleIdentifier)
+                                if let systemIconPath = systemIconPath {
+                                    print("Found system app icon: \(systemIconPath)")
+                                    return systemIconPath
+                                }
+                                
+                                return nil
                             }
+                        } else {
+                            print("Could not read Info.plist at: \(infoPlistPath)")
                         }
                     }
                 }
@@ -349,6 +419,55 @@ class SimulatorService: ObservableObject {
             print("Error getting app icon: \(error)")
         }
         print("No icon found for bundle ID: \(bundleIdentifier)")
+        return nil
+    }
+    
+    private func getSystemAppIcon(for bundleIdentifier: String) -> String? {
+        // Try to find the app in the system Applications folder
+        let systemAppPaths = [
+            "/Applications",
+            "/System/Applications",
+            "/System/Applications/Utilities"
+        ]
+        
+        for appPath in systemAppPaths {
+            do {
+                let appContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
+                for appName in appContents {
+                    if appName.hasSuffix(".app") {
+                        let fullAppPath = "\(appPath)/\(appName)"
+                        let infoPlistPath = "\(fullAppPath)/Contents/Info.plist"
+                        
+                        if FileManager.default.fileExists(atPath: infoPlistPath),
+                           let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
+                            let bundleId = infoPlist["CFBundleIdentifier"] as? String
+                            if bundleId == bundleIdentifier {
+                                // Try to find icon in the app bundle
+                                let iconPath = "\(fullAppPath)/Contents/Resources/AppIcon.icns"
+                                if FileManager.default.fileExists(atPath: iconPath) {
+                                    return iconPath
+                                }
+                                
+                                // Try other common icon locations
+                                let resourcePath = "\(fullAppPath)/Contents/Resources"
+                                if let resourceContents = try? FileManager.default.contentsOfDirectory(atPath: resourcePath) {
+                                    for file in resourceContents {
+                                        if file.hasSuffix(".icns") || (file.hasSuffix(".png") && file.contains("Icon")) {
+                                            let iconPath = "\(resourcePath)/\(file)"
+                                            return iconPath
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                // Continue to next path
+                continue
+            }
+        }
+        
         return nil
     }
     
