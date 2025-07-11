@@ -14,30 +14,33 @@ struct ContentView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+                        // Header
             HStack {
                 Image(systemName: "iphone")
                     .foregroundColor(.blue)
                 Text("Simmer")
                     .font(.headline)
                 Spacer()
-                Button(action: {
-                    simulatorService.loadSimulators()
-                }) {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(PlainButtonStyle())
                 
-#if DEBUG
-                Button(action: {
-                    simulatorService.testProgressBar()
-                }) {
-                    Image(systemName: "play.circle")
-                        .foregroundColor(.green)
+                Menu {
+                    Button("Refresh Simulators") {
+                        simulatorService.loadSimulators()
+                    }
+                    
+                    Divider()
+                    
+                    Button("Quit Simmer") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 12))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(PlainButtonStyle())
-#endif
+                .menuIndicator(.hidden)
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
