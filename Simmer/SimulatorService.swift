@@ -112,6 +112,8 @@ class SimulatorService: ObservableObject {
         var apps: [App] = []
         let dataPath = simulator.dataPath
         
+        print("Loading apps for simulator: \(simulator.name)")
+        
         // First, check if Containers directory exists
         let containersPath = "\(dataPath)/data/Containers"
         guard FileManager.default.fileExists(atPath: containersPath) else {
@@ -128,59 +130,78 @@ class SimulatorService: ObservableObject {
         
         do {
             let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
+            print("Found \(bundleDirectories.count) bundle directories in \(bundlePath)")
             
             for bundleDir in bundleDirectories {
-                let appPath = "\(bundlePath)/\(bundleDir)"
-                let infoPlistPath = "\(appPath)/Info.plist"
+                let bundlePath = "\(bundlePath)/\(bundleDir)"
                 
-                if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
-                    let bundleIdentifier = infoPlist["CFBundleIdentifier"] as? String ?? ""
-                    let appName = infoPlist["CFBundleDisplayName"] as? String ?? 
-                                 infoPlist["CFBundleName"] as? String ?? 
-                                 bundleIdentifier
-                    
-                    // Find corresponding data container
-                    let dataPath = "\(containersPath)/Data/Application"
-                    var documentsPath = ""
-                    var snapshotsPath = ""
-                    
-                    if FileManager.default.fileExists(atPath: dataPath) {
-                        do {
-                            let dataDirectories = try FileManager.default.contentsOfDirectory(atPath: dataPath)
-                            for dataDir in dataDirectories {
-                                let dataAppPath = "\(dataPath)/\(dataDir)"
-                                let metadataPath = "\(dataAppPath)/.com.apple.mobile_container_manager.metadata.plist"
+                // Look for .app bundles in the bundle directory
+                do {
+                    let bundleContents = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
+                    for item in bundleContents {
+                        if item.hasSuffix(".app") {
+                            let appPath = "\(bundlePath)/\(item)"
+                            let infoPlistPath = "\(appPath)/Info.plist"
+                            
+                            if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
+                                let bundleIdentifier = infoPlist["CFBundleIdentifier"] as? String ?? ""
+                                let appName = infoPlist["CFBundleDisplayName"] as? String ?? 
+                                             infoPlist["CFBundleName"] as? String ?? 
+                                             bundleIdentifier
                                 
-                                if let metadata = NSDictionary(contentsOfFile: metadataPath) {
-                                    let dataBundleId = metadata["MCMMetadataIdentifier"] as? String ?? ""
-                                    if dataBundleId == bundleIdentifier {
-                                        documentsPath = "\(dataAppPath)/Documents"
-                                        snapshotsPath = "\(dataAppPath)/Documents/Snapshots"
-                                        break
+                                print("Found app: \(appName) (\(bundleIdentifier))")
+                                
+                                // Find corresponding data container
+                                let dataPath = "\(containersPath)/Data/Application"
+                                var documentsPath = ""
+                                var snapshotsPath = ""
+                                
+                                if FileManager.default.fileExists(atPath: dataPath) {
+                                    do {
+                                        let dataDirectories = try FileManager.default.contentsOfDirectory(atPath: dataPath)
+                                        for dataDir in dataDirectories {
+                                            let dataAppPath = "\(dataPath)/\(dataDir)"
+                                            let metadataPath = "\(dataAppPath)/.com.apple.mobile_container_manager.metadata.plist"
+                                            
+                                            if let metadata = NSDictionary(contentsOfFile: metadataPath) {
+                                                let dataBundleId = metadata["MCMMetadataIdentifier"] as? String ?? ""
+                                                if dataBundleId == bundleIdentifier {
+                                                    documentsPath = "\(dataAppPath)/Documents"
+                                                    snapshotsPath = "\(dataAppPath)/Documents/Snapshots"
+                                                    print("Found data container for \(appName)")
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    } catch {
+                                        print("Error finding data container for \(bundleIdentifier): \(error)")
                                     }
                                 }
+                                
+                                let app = App(
+                                    id: bundleDir,
+                                    name: appName,
+                                    bundleIdentifier: bundleIdentifier,
+                                    iconPath: getAppIconPath(for: bundleIdentifier, in: simulator),
+                                    documentsPath: documentsPath,
+                                    snapshotsPath: snapshotsPath
+                                )
+                                
+                                apps.append(app)
+                            } else {
+                                print("Could not read Info.plist for \(item)")
                             }
-                        } catch {
-                            print("Error finding data container for \(bundleIdentifier): \(error)")
                         }
                     }
-                    
-                    let app = App(
-                        id: bundleDir,
-                        name: appName,
-                        bundleIdentifier: bundleIdentifier,
-                        iconPath: getAppIconPath(for: bundleIdentifier, in: simulator),
-                        documentsPath: documentsPath,
-                        snapshotsPath: snapshotsPath
-                    )
-                    
-                    apps.append(app)
+                } catch {
+                    print("Error reading bundle directory \(bundleDir): \(error)")
                 }
             }
         } catch {
             print("Error loading apps: \(error)")
         }
         
+        print("Returning \(apps.count) apps for simulator \(simulator.name)")
         return apps.sorted { $0.name < $1.name }
     }
     
