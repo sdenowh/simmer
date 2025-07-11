@@ -115,6 +115,11 @@ struct ContentView: View {
                     )
                 }
                 .allowsHitTesting(false)
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .bottom).combined(with: .opacity)
+                ))
+                .animation(.easeInOut(duration: 0.3), value: simulatorService.isSnapshotOperationInProgress)
             }
             }
             .frame(width: 300, height: 400)
