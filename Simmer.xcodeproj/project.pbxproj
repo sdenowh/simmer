@@ -29,9 +29,22 @@
 		6D1B28942E20BF130029C565 /* SimmerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SimmerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		6D1B28D32E216E190029C565 /* Exceptions for "Simmer" folder in "Simmer" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 6D1B28782E20BF120029C565 /* Simmer */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		6D1B287B2E20BF120029C565 /* Simmer */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				6D1B28D32E216E190029C565 /* Exceptions for "Simmer" folder in "Simmer" target */,
+			);
 			path = Simmer;
 			sourceTree = "<group>";
 		};
