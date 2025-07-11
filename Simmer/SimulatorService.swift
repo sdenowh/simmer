@@ -16,6 +16,9 @@ class SimulatorService: ObservableObject {
     @Published var snapshots: [Snapshot] = []
     @Published var totalSnapshotsSize: Int64 = 0
     @Published var isLoadingTotalSnapshotsSize: Bool = false
+    @Published var isSnapshotOperationInProgress: Bool = false
+    @Published var snapshotOperationProgress: Double = 0.0
+    @Published var snapshotOperationMessage: String = ""
     
     private let simulatorPath = "~/Library/Developer/CoreSimulator/Devices"
     private let expandedSimulatorPath = NSString(string: "~/Library/Developer/CoreSimulator/Devices").expandingTildeInPath
@@ -499,48 +502,146 @@ class SimulatorService: ObservableObject {
         print("Snapshots path: \(app.snapshotsPath)")
         print("Snapshot path: \(snapshotPath)")
         
-        do {
-            // Check if Documents directory exists
-            let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
-            print("Documents directory exists: \(documentsExists)")
-            
-            if documentsExists {
-                // Create Snapshots directory if it doesn't exist
-                let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
-                print("Snapshots directory exists: \(snapshotsExists)")
+        // Start progress tracking
+        DispatchQueue.main.async {
+            self.isSnapshotOperationInProgress = true
+            self.snapshotOperationProgress = 0.0
+            self.snapshotOperationMessage = "Preparing snapshot..."
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                // Check if Documents directory exists
+                let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
+                print("Documents directory exists: \(documentsExists)")
                 
-                if !snapshotsExists {
-                    try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
-                    print("Created snapshots directory")
+                if documentsExists {
+                    DispatchQueue.main.async {
+                        self.snapshotOperationProgress = 0.2
+                        self.snapshotOperationMessage = "Creating directories..."
+                    }
+                    
+                    // Create Snapshots directory if it doesn't exist
+                    let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
+                    print("Snapshots directory exists: \(snapshotsExists)")
+                    
+                    if !snapshotsExists {
+                        try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
+                        print("Created snapshots directory")
+                    }
+                    
+                    // Create the snapshot directory first
+                    try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
+                    print("Created snapshot directory: \(snapshotPath)")
+                    
+                    DispatchQueue.main.async {
+                        self.snapshotOperationProgress = 0.4
+                        self.snapshotOperationMessage = "Copying documents..."
+                    }
+                    
+                    // Copy the Documents directory itself to the snapshot
+                    let documentsDestinationPath = "\(snapshotPath)/Documents"
+                    try FileManager.default.copyItem(atPath: app.documentsPath, toPath: documentsDestinationPath)
+                    
+                    DispatchQueue.main.async {
+                        self.snapshotOperationProgress = 0.8
+                        self.snapshotOperationMessage = "Finalizing snapshot..."
+                    }
+                    
+                    DispatchQueue.main.async {
+                        self.loadSnapshots(for: app)
+                        self.isSnapshotOperationInProgress = false
+                        self.snapshotOperationProgress = 1.0
+                        self.snapshotOperationMessage = "Snapshot created successfully!"
+                        
+                        // Reset progress after a short delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.snapshotOperationProgress = 0.0
+                            self.snapshotOperationMessage = ""
+                        }
+                    }
+                    
+                    print("Snapshot created successfully: \(snapshotName)")
+                } else {
+                    DispatchQueue.main.async {
+                        self.isSnapshotOperationInProgress = false
+                        self.snapshotOperationMessage = "Documents directory does not exist"
+                        
+                        // Reset progress after a short delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self.snapshotOperationProgress = 0.0
+                            self.snapshotOperationMessage = ""
+                        }
+                    }
+                    print("Documents directory does not exist for \(app.name)")
                 }
-                
-                // Create the snapshot directory first
-                try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
-                print("Created snapshot directory: \(snapshotPath)")
-                
-                // Copy the Documents directory itself to the snapshot
-                let documentsDestinationPath = "\(snapshotPath)/Documents"
-                try FileManager.default.copyItem(atPath: app.documentsPath, toPath: documentsDestinationPath)
-                loadSnapshots(for: app)
-                print("Snapshot created successfully: \(snapshotName)")
-            } else {
-                print("Documents directory does not exist for \(app.name)")
+            } catch {
+                DispatchQueue.main.async {
+                    self.isSnapshotOperationInProgress = false
+                    self.snapshotOperationMessage = "Error taking snapshot: \(error.localizedDescription)"
+                    
+                    // Reset progress after a short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        self.snapshotOperationProgress = 0.0
+                        self.snapshotOperationMessage = ""
+                    }
+                }
+                print("Error taking snapshot: \(error)")
             }
-        } catch {
-            print("Error taking snapshot: \(error)")
         }
     }
     
     func restoreSnapshot(_ snapshot: Snapshot, for app: App) {
-        do {
-            // Remove current documents
-            try FileManager.default.removeItem(atPath: app.documentsPath)
-            
-            // Copy the Documents directory from the snapshot to the app's documents path
-            let snapshotDocumentsPath = "\(snapshot.path)/Documents"
-            try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
-        } catch {
-            print("Error restoring snapshot: \(error)")
+        // Start progress tracking
+        DispatchQueue.main.async {
+            self.isSnapshotOperationInProgress = true
+            self.snapshotOperationProgress = 0.0
+            self.snapshotOperationMessage = "Preparing to restore snapshot..."
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                DispatchQueue.main.async {
+                    self.snapshotOperationProgress = 0.3
+                    self.snapshotOperationMessage = "Removing current documents..."
+                }
+                
+                // Remove current documents
+                try FileManager.default.removeItem(atPath: app.documentsPath)
+                
+                DispatchQueue.main.async {
+                    self.snapshotOperationProgress = 0.6
+                    self.snapshotOperationMessage = "Restoring snapshot documents..."
+                }
+                
+                // Copy the Documents directory from the snapshot to the app's documents path
+                let snapshotDocumentsPath = "\(snapshot.path)/Documents"
+                try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
+                
+                DispatchQueue.main.async {
+                    self.snapshotOperationProgress = 1.0
+                    self.snapshotOperationMessage = "Snapshot restored successfully!"
+                    self.isSnapshotOperationInProgress = false
+                    
+                    // Reset progress after a short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.snapshotOperationProgress = 0.0
+                        self.snapshotOperationMessage = ""
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isSnapshotOperationInProgress = false
+                    self.snapshotOperationMessage = "Error restoring snapshot: \(error.localizedDescription)"
+                    
+                    // Reset progress after a short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        self.snapshotOperationProgress = 0.0
+                        self.snapshotOperationMessage = ""
+                    }
+                }
+                print("Error restoring snapshot: \(error)")
+            }
         }
     }
     

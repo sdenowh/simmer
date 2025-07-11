@@ -34,6 +34,29 @@ struct ContentView: View {
             
             Divider()
             
+            // Progress Bar for Snapshot Operations
+            if simulatorService.isSnapshotOperationInProgress {
+                VStack(spacing: 8) {
+                    Text(simulatorService.snapshotOperationMessage)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                    
+                    ProgressView(value: simulatorService.snapshotOperationProgress)
+                        .progressViewStyle(LinearProgressViewStyle())
+                        .scaleEffect(y: 0.5)
+                    
+                    Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                
+                Divider()
+            }
+            
             // Content
             ScrollView {
                 LazyVStack(spacing: 0) {
