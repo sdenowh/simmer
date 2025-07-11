@@ -890,4 +890,11 @@ class SimulatorService: ObservableObject {
             }
         }
     }
+
+    // Call this to refresh disk usage for the selected app
+    func refreshSelectedAppDiskUsage() {
+        if let app = selectedApp {
+            loadSnapshots(for: app)
+        }
+    }
 } 

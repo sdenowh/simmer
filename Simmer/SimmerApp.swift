@@ -18,9 +18,16 @@ struct SimmerApp {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppState: ObservableObject {
+    @Published var popoverAppearanceCount: Int = 0
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private let appState = AppState()
+    private let simulatorService = SimulatorService() // Shared instance
+    private var contentView: ContentView?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -41,7 +48,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover = NSPopover()
         popover?.contentSize = NSSize(width: 300, height: 400)
         popover?.behavior = .transient
-        popover?.contentViewController = NSHostingController(rootView: ContentView())
+        popover?.delegate = self
+        let contentView = ContentView(appState: appState, simulatorService: simulatorService)
+        self.contentView = contentView
+        popover?.contentViewController = NSHostingController(rootView: contentView)
     }
     
     @objc private func togglePopover() {
@@ -49,8 +59,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if popover?.isShown == true {
                 popover?.performClose(nil)
             } else {
-                popover?.show(relativeTo: button.bounds, of: button, preferredEdge: NSRectEdge.minY)
+                popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             }
         }
+    }
+    
+    // MARK: - NSPopoverDelegate
+    
+    func popoverDidShow(_ notification: Notification) {
+        appState.popoverAppearanceCount += 1
+        simulatorService.refreshSelectedAppDiskUsage()
     }
 }

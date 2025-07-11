@@ -8,6 +8,11 @@
 import SwiftUI
 
 struct ContentView: View {
+    @ObservedObject var appState: AppState
+    @ObservedObject var simulatorService: SimulatorService
+    @State private var selectedSimulator: Simulator?
+    @State private var selectedApp: App?
+    
     private func getAppVersion() -> String {
         if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
            let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
@@ -15,18 +20,25 @@ struct ContentView: View {
         }
         return "Unknown"
     }
-    @StateObject private var simulatorService = SimulatorService()
-    @State private var selectedSimulator: Simulator?
-    @State private var selectedApp: App?
+    
+    // Public method to refresh disk usage for expanded app
+    public func refreshExpandedAppDiskUsage() {
+        if let _ = selectedSimulator, let app = selectedApp {
+            simulatorService.loadSnapshots(for: app)
+        }
+    }
     
     var body: some View {
         VStack(spacing: 0) {
-                        // Header
+            // Header
             HStack {
                 Image(systemName: "iphone")
                     .foregroundColor(.blue)
                 Text("Simmer")
                     .font(.headline)
+                Text("(\(appState.popoverAppearanceCount))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Spacer()
                 
                 Menu {
@@ -504,5 +516,5 @@ struct VisualEffectView: NSViewRepresentable {
 }
 
 #Preview {
-    ContentView()
+    ContentView(appState: AppState(), simulatorService: SimulatorService())
 }
