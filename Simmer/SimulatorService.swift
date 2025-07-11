@@ -212,45 +212,58 @@ class SimulatorService: ObservableObject {
     
     private func getAppIconPath(for bundleIdentifier: String, in simulator: Simulator) -> String? {
         let bundlePath = "\(simulator.dataPath)/data/Containers/Bundle/Application"
-        
         do {
             let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
-            
             for bundleDir in bundleDirectories {
                 let appPath = "\(bundlePath)/\(bundleDir)"
-                let infoPlistPath = "\(appPath)/Info.plist"
-                
-                if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
-                    let bundleId = infoPlist["CFBundleIdentifier"] as? String
-                    if bundleId == bundleIdentifier {
-                        // Look for the app bundle directory
-                        let appBundleContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
-                        for item in appBundleContents {
-                            if item.hasSuffix(".app") {
-                                let appBundlePath = "\(appPath)/\(item)"
-                                
-                                // Try different icon file patterns
-                                let iconPatterns = [
-                                    "AppIcon60x60@2x.png",
-                                    "AppIcon60x60.png",
-                                    "AppIcon76x76@2x~ipad.png",
-                                    "AppIcon76x76~ipad.png"
-                                ]
-                                
-                                for pattern in iconPatterns {
-                                    let iconPath = "\(appBundlePath)/\(pattern)"
-                                    if FileManager.default.fileExists(atPath: iconPath) {
-                                        print("Found app icon: \(iconPath)")
-                                        return iconPath
+                let appBundleContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
+                for item in appBundleContents {
+                    if item.hasSuffix(".app") {
+                        let appBundlePath = "\(appPath)/\(item)"
+                        let infoPlistPath = "\(appBundlePath)/Info.plist"
+                        if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
+                            let bundleId = infoPlist["CFBundleIdentifier"] as? String
+                            if bundleId == bundleIdentifier {
+                                // Try iPhone icons
+                                if let icons = infoPlist["CFBundleIcons"] as? [String: Any],
+                                   let primaryIcon = icons["CFBundlePrimaryIcon"] as? [String: Any],
+                                   let iconFiles = primaryIcon["CFBundleIconFiles"] as? [String] {
+                                    for iconFile in iconFiles {
+                                        let patterns = [
+                                            "\(iconFile)@3x.png", "\(iconFile)@2x.png", "\(iconFile).png"
+                                        ]
+                                        for pattern in patterns {
+                                            let iconPath = "\(appBundlePath)/\(pattern)"
+                                            if FileManager.default.fileExists(atPath: iconPath) {
+                                                print("Found app icon: \(iconPath)")
+                                                return iconPath
+                                            }
+                                        }
                                     }
                                 }
-                                
-                                // If no specific icon found, try to find any PNG file that looks like an app icon
+                                // Try iPad icons
+                                if let iconsIpad = infoPlist["CFBundleIcons~ipad"] as? [String: Any],
+                                   let primaryIconIpad = iconsIpad["CFBundlePrimaryIcon"] as? [String: Any],
+                                   let iconFilesIpad = primaryIconIpad["CFBundleIconFiles"] as? [String] {
+                                    for iconFile in iconFilesIpad {
+                                        let patterns = [
+                                            "\(iconFile)@2x~ipad.png", "\(iconFile)~ipad.png", "\(iconFile)@2x.png", "\(iconFile).png"
+                                        ]
+                                        for pattern in patterns {
+                                            let iconPath = "\(appBundlePath)/\(pattern)"
+                                            if FileManager.default.fileExists(atPath: iconPath) {
+                                                print("Found iPad app icon: \(iconPath)")
+                                                return iconPath
+                                            }
+                                        }
+                                    }
+                                }
+                                // Fallback: scan for any AppIcon*.png
                                 if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
                                     for file in bundleContents {
                                         if file.hasPrefix("AppIcon") && file.hasSuffix(".png") {
                                             let iconPath = "\(appBundlePath)/\(file)"
-                                            print("Found app icon: \(iconPath)")
+                                            print("Found app icon (fallback): \(iconPath)")
                                             return iconPath
                                         }
                                     }
@@ -263,7 +276,7 @@ class SimulatorService: ObservableObject {
         } catch {
             print("Error getting app icon: \(error)")
         }
-        
+        print("No icon found for bundle ID: \(bundleIdentifier)")
         return nil
     }
     
