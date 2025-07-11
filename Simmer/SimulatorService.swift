@@ -7,8 +7,16 @@
 
 import Foundation
 import AppKit
+import os.log
 
 class SimulatorService: ObservableObject {
+    private let logger = Logger(subsystem: "com.simmer.app", category: "SimulatorService")
+    
+    private func log(_ message: String, type: OSLogType = .default) {
+        logger.log(level: type, "\(message)")
+        print("[Simmer] \(message)")
+    }
+    
     @Published var simulators: [Simulator] = []
     @Published var selectedSimulator: Simulator?
     @Published var apps: [App] = []
@@ -34,25 +42,25 @@ class SimulatorService: ObservableObject {
         self.simulators = sortSimulators(simulators)
         
         // Debug: Log simulator information
-        print("=== Simulator Debug Info ===")
-        print("Found \(simulators.count) simulators")
+        log("=== Simulator Debug Info ===")
+        log("Found \(simulators.count) simulators")
         for simulator in simulators {
-            print("Simulator: \(simulator.name) (\(simulator.iOSVersion))")
-            print("  Data Path: \(simulator.dataPath)")
-            print("  Bundle Path: \(simulator.dataPath)/data/Containers/Bundle/Application")
+            log("Simulator: \(simulator.name) (\(simulator.iOSVersion))")
+            log("  Data Path: \(simulator.dataPath)")
+            log("  Bundle Path: \(simulator.dataPath)/data/Containers/Bundle/Application")
             
             let bundlePath = "\(simulator.dataPath)/data/Containers/Bundle/Application"
             if FileManager.default.fileExists(atPath: bundlePath) {
                 do {
                     let bundleContents = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
-                    print("  Bundle Contents: \(bundleContents.count) items")
+                    log("  Bundle Contents: \(bundleContents.count) items")
                 } catch {
-                    print("  Error reading bundle contents: \(error)")
+                    log("  Error reading bundle contents: \(error)", type: .error)
                 }
             } else {
-                print("  Bundle path does not exist")
+                log("  Bundle path does not exist")
             }
-            print("---")
+            log("---")
         }
     }
     
@@ -149,7 +157,7 @@ class SimulatorService: ObservableObject {
                 }
             }
         } catch {
-            print("Error loading simulators: \(error)")
+            log("Error loading simulators: \(error)", type: .error)
         }
         
         return simulators.sorted { $0.name < $1.name }
@@ -194,25 +202,25 @@ class SimulatorService: ObservableObject {
         var apps: [App] = []
         let dataPath = simulator.dataPath
         
-        print("Loading apps for simulator: \(simulator.name)")
+        log("Loading apps for simulator: \(simulator.name)")
         
         // First, check if Containers directory exists
         let containersPath = "\(dataPath)/data/Containers"
         guard FileManager.default.fileExists(atPath: containersPath) else {
-            print("No Containers directory found for simulator \(simulator.name)")
+            log("No Containers directory found for simulator \(simulator.name)")
             return apps
         }
         
         // Get installed apps from Bundle/Application
         let bundlePath = "\(containersPath)/Bundle/Application"
         guard FileManager.default.fileExists(atPath: bundlePath) else {
-            print("No Bundle/Application directory found for simulator \(simulator.name)")
+            log("No Bundle/Application directory found for simulator \(simulator.name)")
             return apps
         }
         
         do {
             let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
-            print("Found \(bundleDirectories.count) bundle directories in \(bundlePath)")
+            log("Found \(bundleDirectories.count) bundle directories in \(bundlePath)")
             
             for bundleDir in bundleDirectories {
                 let bundlePath = "\(bundlePath)/\(bundleDir)"
@@ -231,7 +239,7 @@ class SimulatorService: ObservableObject {
                                              infoPlist["CFBundleName"] as? String ?? 
                                              bundleIdentifier
                                 
-                                print("Found app: \(appName) (\(bundleIdentifier))")
+                                log("Found app: \(appName) (\(bundleIdentifier))")
                                 
                                 // Find corresponding data container
                                 let dataPath = "\(containersPath)/Data/Application"
@@ -250,13 +258,13 @@ class SimulatorService: ObservableObject {
                                                 if dataBundleId == bundleIdentifier {
                                                     documentsPath = "\(dataAppPath)/Documents"
                                                     snapshotsPath = "\(dataAppPath)/Snapshots"
-                                                    print("Found data container for \(appName)")
+                                                    log("Found data container for \(appName)")
                                                     break
                                                 }
                                             }
                                         }
                                     } catch {
-                                        print("Error finding data container for \(bundleIdentifier): \(error)")
+                                        log("Error finding data container for \(bundleIdentifier): \(error)", type: .error)
                                     }
                                 }
                                 
@@ -283,19 +291,19 @@ class SimulatorService: ObservableObject {
                                 
                                 apps.append(app)
                             } else {
-                                print("Could not read Info.plist for \(item)")
+                                log("Could not read Info.plist for \(item)")
                             }
                         }
                     }
                 } catch {
-                    print("Error reading bundle directory \(bundleDir): \(error)")
+                    log("Error reading bundle directory \(bundleDir): \(error)", type: .error)
                 }
             }
         } catch {
-            print("Error loading apps: \(error)")
+            log("Error loading apps: \(error)", type: .error)
         }
         
-        print("Returning \(apps.count) apps for simulator \(simulator.name)")
+        log("Returning \(apps.count) apps for simulator \(simulator.name)")
         return apps.sorted { $0.name < $1.name }
     }
     
@@ -309,7 +317,7 @@ class SimulatorService: ObservableObject {
         
         // Check if the bundle path exists
         guard FileManager.default.fileExists(atPath: bundlePath) else {
-            print("Bundle path does not exist: \(bundlePath)")
+            log("Bundle path does not exist: \(bundlePath)")
             return nil
         }
         
@@ -331,14 +339,14 @@ class SimulatorService: ObservableObject {
                         
                         // Check if Info.plist exists
                         guard FileManager.default.fileExists(atPath: infoPlistPath) else {
-                            print("Info.plist not found at: \(infoPlistPath)")
+                            log("Info.plist not found at: \(infoPlistPath)")
                             continue
                         }
                         
                         if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
                             let bundleId = infoPlist["CFBundleIdentifier"] as? String
                             if bundleId == bundleIdentifier {
-                                print("Found matching bundle for \(bundleIdentifier) at: \(appBundlePath)")
+                                log("Found matching bundle for \(bundleIdentifier) at: \(appBundlePath)")
                                 
                                 // Try iPhone icons
                                 if let icons = infoPlist["CFBundleIcons"] as? [String: Any],
@@ -351,8 +359,8 @@ class SimulatorService: ObservableObject {
                                         for pattern in patterns {
                                             let iconPath = "\(appBundlePath)/\(pattern)"
                                             if FileManager.default.fileExists(atPath: iconPath) {
-                                                print("Found app icon: \(iconPath)")
-                                                return iconPath
+                                                                                            log("Found app icon: \(iconPath)")
+                                            return iconPath
                                             }
                                         }
                                     }
@@ -369,7 +377,7 @@ class SimulatorService: ObservableObject {
                                         for pattern in patterns {
                                             let iconPath = "\(appBundlePath)/\(pattern)"
                                             if FileManager.default.fileExists(atPath: iconPath) {
-                                                print("Found iPad app icon: \(iconPath)")
+                                                log("Found iPad app icon: \(iconPath)")
                                                 return iconPath
                                             }
                                         }
@@ -381,7 +389,7 @@ class SimulatorService: ObservableObject {
                                     for file in bundleContents {
                                         if file.hasPrefix("AppIcon") && file.hasSuffix(".png") {
                                             let iconPath = "\(appBundlePath)/\(file)"
-                                            print("Found app icon (fallback): \(iconPath)")
+                                            log("Found app icon (fallback): \(iconPath)")
                                             return iconPath
                                         }
                                     }
@@ -392,33 +400,33 @@ class SimulatorService: ObservableObject {
                                     for file in bundleContents {
                                         if file.hasSuffix(".png") && (file.contains("Icon") || file.contains("icon")) {
                                             let iconPath = "\(appBundlePath)/\(file)"
-                                            print("Found app icon (additional fallback): \(iconPath)")
+                                            log("Found app icon (additional fallback): \(iconPath)")
                                             return iconPath
                                         }
                                     }
                                 }
                                 
-                                print("No icon files found for bundle: \(bundleIdentifier)")
+                                log("No icon files found for bundle: \(bundleIdentifier)")
                                 
                                 // Final fallback: try to get icon from system app store
                                 let systemIconPath = self.getSystemAppIcon(for: bundleIdentifier)
                                 if let systemIconPath = systemIconPath {
-                                    print("Found system app icon: \(systemIconPath)")
-                                    return systemIconPath
+                                                                    log("Found system app icon: \(systemIconPath)")
+                                return systemIconPath
                                 }
                                 
                                 return nil
                             }
                         } else {
-                            print("Could not read Info.plist at: \(infoPlistPath)")
+                            log("Could not read Info.plist at: \(infoPlistPath)")
                         }
                     }
                 }
             }
         } catch {
-            print("Error getting app icon: \(error)")
+            log("Error getting app icon: \(error)", type: .error)
         }
-        print("No icon found for bundle ID: \(bundleIdentifier)")
+        log("No icon found for bundle ID: \(bundleIdentifier)")
         return nil
     }
     
@@ -500,7 +508,7 @@ class SimulatorService: ObservableObject {
                 snapshots.append(snapshot)
             }
         } catch {
-            print("Error loading snapshots: \(error)")
+            log("Error loading snapshots: \(error)", type: .error)
         }
         
         let sortedSnapshots = snapshots.sorted { $0.date > $1.date }
@@ -532,7 +540,7 @@ class SimulatorService: ObservableObject {
                     totalSize += fileAttributes[.size] as? Int64 ?? 0
                 }
             } catch {
-                print("Error calculating snapshot size for \(snapshot.name): \(error)")
+                self.log("Error calculating snapshot size for \(snapshot.name): \(error)", type: .error)
             }
             
             completion(totalSize)
@@ -551,7 +559,7 @@ class SimulatorService: ObservableObject {
                     totalSize += fileAttributes[.size] as? Int64 ?? 0
                 }
             } catch {
-                print("Error calculating documents size for \(app.name): \(error)")
+                self.log("Error calculating documents size for \(app.name): \(error)", type: .error)
             }
             
             completion(totalSize)
@@ -571,7 +579,7 @@ class SimulatorService: ObservableObject {
                 totalSize += attributes[.size] as? Int64 ?? 0
             }
         } catch {
-            print("Error calculating directory size: \(error)")
+            log("Error calculating directory size: \(error)", type: .error)
         }
         
         return DirectorySize(size: totalSize)
@@ -592,7 +600,7 @@ class SimulatorService: ObservableObject {
                         totalSize += attributes[.size] as? Int64 ?? 0
                     }
                 } catch {
-                    print("Error calculating snapshots size: \(error)")
+                    self.log("Error calculating snapshots size: \(error)", type: .error)
                 }
             }
             
@@ -616,10 +624,10 @@ class SimulatorService: ObservableObject {
         let snapshotName = "snapshot_\(timestamp)"
         let snapshotPath = "\(app.snapshotsPath)/\(snapshotName)"
         
-        print("Taking snapshot for \(app.name)")
-        print("Documents path: \(app.documentsPath)")
-        print("Snapshots path: \(app.snapshotsPath)")
-        print("Snapshot path: \(snapshotPath)")
+        log("Taking snapshot for \(app.name)")
+        log("Documents path: \(app.documentsPath)")
+        log("Snapshots path: \(app.snapshotsPath)")
+        log("Snapshot path: \(snapshotPath)")
         
         // Start progress tracking
         DispatchQueue.main.async {
@@ -632,7 +640,7 @@ class SimulatorService: ObservableObject {
             do {
                 // Check if Documents directory exists
                 let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
-                print("Documents directory exists: \(documentsExists)")
+                self.log("Documents directory exists: \(documentsExists)")
                 
                 if documentsExists {
                     DispatchQueue.main.async {
@@ -642,16 +650,16 @@ class SimulatorService: ObservableObject {
                     
                     // Create Snapshots directory if it doesn't exist
                     let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
-                    print("Snapshots directory exists: \(snapshotsExists)")
+                    self.log("Snapshots directory exists: \(snapshotsExists)")
                     
                     if !snapshotsExists {
                         try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
-                        print("Created snapshots directory")
+                        self.log("Created snapshots directory")
                     }
                     
                     // Create the snapshot directory first
                     try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
-                    print("Created snapshot directory: \(snapshotPath)")
+                    self.log("Created snapshot directory: \(snapshotPath)")
                     
                     DispatchQueue.main.async {
                         self.snapshotOperationProgress = 0.4
@@ -680,7 +688,7 @@ class SimulatorService: ObservableObject {
                         }
                     }
                     
-                    print("Snapshot created successfully: \(snapshotName)")
+                    self.log("Snapshot created successfully: \(snapshotName)")
                 } else {
                     DispatchQueue.main.async {
                         self.isSnapshotOperationInProgress = false
@@ -692,7 +700,7 @@ class SimulatorService: ObservableObject {
                             self.snapshotOperationMessage = ""
                         }
                     }
-                    print("Documents directory does not exist for \(app.name)")
+                    self.log("Documents directory does not exist for \(app.name)")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -705,7 +713,7 @@ class SimulatorService: ObservableObject {
                         self.snapshotOperationMessage = ""
                     }
                 }
-                print("Error taking snapshot: \(error)")
+                self.log("Error taking snapshot: \(error)", type: .error)
             }
         }
     }
@@ -759,7 +767,7 @@ class SimulatorService: ObservableObject {
                         self.snapshotOperationMessage = ""
                     }
                 }
-                print("Error restoring snapshot: \(error)")
+                self.log("Error restoring snapshot: \(error)", type: .error)
             }
         }
     }
@@ -769,7 +777,7 @@ class SimulatorService: ObservableObject {
             try FileManager.default.removeItem(atPath: snapshot.path)
             loadSnapshots(for: selectedApp!)
         } catch {
-            print("Error deleting snapshot: \(error)")
+            log("Error deleting snapshot: \(error)", type: .error)
         }
     }
     
@@ -782,7 +790,7 @@ class SimulatorService: ObservableObject {
                     try FileManager.default.removeItem(atPath: snapshotPath)
                 }
             } catch {
-                print("Error deleting snapshots: \(error)")
+                log("Error deleting snapshots: \(error)", type: .error)
             }
         }
         
