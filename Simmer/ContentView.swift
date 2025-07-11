@@ -194,9 +194,15 @@ struct AppActionsView: View {
                     
                     Spacer()
                     
-                    Text(simulatorService.getDirectorySize(for: app.documentsPath).formattedSize)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                    if app.isLoadingDocumentsSize {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Text(DirectorySize(size: app.documentsSize).formattedSize)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -293,9 +299,15 @@ struct SnapshotRowView: View {
                     
                     Spacer()
                     
-                    Text(DirectorySize(size: snapshot.size).formattedSize)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                    if snapshot.isLoadingSize {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Text(DirectorySize(size: snapshot.size).formattedSize)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)

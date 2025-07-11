@@ -54,14 +54,35 @@ struct App: Identifiable, Hashable {
     let iconPath: String?
     let documentsPath: String
     let snapshotsPath: String
+    var documentsSize: Int64 = 0
+    var isLoadingDocumentsSize: Bool = false
+    
+    mutating func startLoadingDocumentsSize() {
+        isLoadingDocumentsSize = true
+    }
+    
+    mutating func finishLoadingDocumentsSize(_ calculatedSize: Int64) {
+        documentsSize = calculatedSize
+        isLoadingDocumentsSize = false
+    }
 }
 
 struct Snapshot: Identifiable, Hashable {
     let id: String
     let name: String
     let date: Date
-    let size: Int64
+    var size: Int64
     let path: String
+    var isLoadingSize: Bool = false
+    
+    mutating func startLoadingSize() {
+        isLoadingSize = true
+    }
+    
+    mutating func finishLoadingSize(_ calculatedSize: Int64) {
+        size = calculatedSize
+        isLoadingSize = false
+    }
 }
 
 struct DirectorySize {
