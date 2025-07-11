@@ -274,9 +274,15 @@ struct AppActionsView: View {
                             
                             Spacer()
                             
-                            Text(simulatorService.getAllSnapshotsSize().formattedSize)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
+                            if simulatorService.isLoadingTotalSnapshotsSize {
+                                ProgressView()
+                                    .scaleEffect(0.4)
+                                    .frame(width: 8, height: 8)
+                            } else {
+                                Text(simulatorService.getAllSnapshotsSize().formattedSize)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)

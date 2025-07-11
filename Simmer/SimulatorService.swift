@@ -14,6 +14,8 @@ class SimulatorService: ObservableObject {
     @Published var apps: [App] = []
     @Published var selectedApp: App?
     @Published var snapshots: [Snapshot] = []
+    @Published var totalSnapshotsSize: Int64 = 0
+    @Published var isLoadingTotalSnapshotsSize: Bool = false
     
     private let simulatorPath = "~/Library/Developer/CoreSimulator/Devices"
     private let expandedSimulatorPath = NSString(string: "~/Library/Developer/CoreSimulator/Devices").expandingTildeInPath
@@ -70,6 +72,11 @@ class SimulatorService: ObservableObject {
     func loadSnapshots(for app: App) {
         snapshots = getSnapshots(for: app)
         selectedApp = app
+        
+        // Calculate total snapshots size if there are snapshots
+        if !snapshots.isEmpty {
+            calculateTotalSnapshotsSize()
+        }
         
         // Ensure the app is in the apps array and has loading state set
         if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
@@ -448,23 +455,34 @@ class SimulatorService: ObservableObject {
         return DirectorySize(size: totalSize)
     }
     
-    func getAllSnapshotsSize() -> DirectorySize {
-        var totalSize: Int64 = 0
+    func calculateTotalSnapshotsSize() {
+        isLoadingTotalSnapshotsSize = true
         
-        for app in apps {
-            do {
-                let enumerator = FileManager.default.enumerator(atPath: app.snapshotsPath)
-                while let file = enumerator?.nextObject() as? String {
-                    let filePath = "\(app.snapshotsPath)/\(file)"
-                    let attributes = try FileManager.default.attributesOfItem(atPath: filePath)
-                    totalSize += attributes[.size] as? Int64 ?? 0
+        DispatchQueue.global(qos: .userInitiated).async {
+            var totalSize: Int64 = 0
+            
+            for app in self.apps {
+                do {
+                    let enumerator = FileManager.default.enumerator(atPath: app.snapshotsPath)
+                    while let file = enumerator?.nextObject() as? String {
+                        let filePath = "\(app.snapshotsPath)/\(file)"
+                        let attributes = try FileManager.default.attributesOfItem(atPath: filePath)
+                        totalSize += attributes[.size] as? Int64 ?? 0
+                    }
+                } catch {
+                    print("Error calculating snapshots size: \(error)")
                 }
-            } catch {
-                print("Error calculating snapshots size: \(error)")
+            }
+            
+            DispatchQueue.main.async {
+                self.totalSnapshotsSize = totalSize
+                self.isLoadingTotalSnapshotsSize = false
             }
         }
-        
-        return DirectorySize(size: totalSize)
+    }
+    
+    func getAllSnapshotsSize() -> DirectorySize {
+        return DirectorySize(size: totalSnapshotsSize)
     }
     
     func openDocumentsFolder(for app: App) {
