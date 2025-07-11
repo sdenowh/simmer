@@ -17,13 +17,49 @@ class SimulatorService: ObservableObject {
     
     private let simulatorPath = "~/Library/Developer/CoreSimulator/Devices"
     private let expandedSimulatorPath = NSString(string: "~/Library/Developer/CoreSimulator/Devices").expandingTildeInPath
+    private let pinnedSimulatorsKey = "PinnedSimulators"
     
     init() {
         loadSimulators()
     }
     
     func loadSimulators() {
-        simulators = getAvailableSimulators()
+        var simulators = getAvailableSimulators()
+        loadPinnedState(&simulators)
+        self.simulators = sortSimulators(simulators)
+    }
+    
+    func togglePin(for simulator: Simulator) {
+        if let index = simulators.firstIndex(where: { $0.id == simulator.id }) {
+            simulators[index].isPinned.toggle()
+            savePinnedState()
+            simulators = sortSimulators(simulators)
+        }
+    }
+    
+    private func sortSimulators(_ simulators: [Simulator]) -> [Simulator] {
+        return simulators.sorted { first, second in
+            if first.isPinned && !second.isPinned {
+                return true
+            } else if !first.isPinned && second.isPinned {
+                return false
+            } else {
+                return first.name < second.name
+            }
+        }
+    }
+    
+    private func loadPinnedState(_ simulators: inout [Simulator]) {
+        if let pinnedIds = UserDefaults.standard.array(forKey: pinnedSimulatorsKey) as? [String] {
+            for (index, simulator) in simulators.enumerated() {
+                simulators[index].isPinned = pinnedIds.contains(simulator.id)
+            }
+        }
+    }
+    
+    private func savePinnedState() {
+        let pinnedIds = simulators.filter { $0.isPinned }.map { $0.id }
+        UserDefaults.standard.set(pinnedIds, forKey: pinnedSimulatorsKey)
     }
     
     func loadApps(for simulator: Simulator) {

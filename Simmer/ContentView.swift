@@ -50,7 +50,8 @@ struct ContentView: View {
                                     selectedApp = nil
                                     simulatorService.loadApps(for: simulator)
                                 }
-                            }
+                            },
+                            simulatorService: simulatorService
                         )
                         
                         if selectedSimulator?.id == simulator.id {
@@ -85,35 +86,50 @@ struct SimulatorRowView: View {
     let simulator: Simulator
     let isSelected: Bool
     let onTap: () -> Void
+    @ObservedObject var simulatorService: SimulatorService
     
     var body: some View {
-        Button(action: onTap) {
-            HStack {
-                Image(systemName: simulator.deviceType.icon)
-                    .foregroundColor(.blue)
-                    .frame(width: 20)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(simulator.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.primary)
+        HStack {
+            Button(action: onTap) {
+                HStack {
+                    Image(systemName: simulator.deviceType.icon)
+                        .foregroundColor(.blue)
+                        .frame(width: 20)
                     
-                    Text(simulator.formattedVersion)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(simulator.name)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.primary)
+                        
+                        Text(simulator.formattedVersion)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
                 }
-                
-                Spacer()
-                
-                Image(systemName: isSelected ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+            .buttonStyle(PlainButtonStyle())
+            
+            // Pin button
+            Button(action: {
+                simulatorService.togglePin(for: simulator)
+            }) {
+                Image(systemName: simulator.isPinned ? "pin.fill" : "pin")
+                    .foregroundColor(simulator.isPinned ? .orange : .secondary)
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            // Disclosure chevron
+            Image(systemName: isSelected ? "chevron.down" : "chevron.right")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .padding(.trailing, 8)
         }
-        .buttonStyle(PlainButtonStyle())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
     }
 }
 

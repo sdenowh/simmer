@@ -8,13 +8,14 @@
 import Foundation
 import SwiftUI
 
-struct Simulator: Identifiable, Hashable {
+struct Simulator: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let iOSVersion: String
     let deviceType: DeviceType
     let udid: String
     let dataPath: String
+    var isPinned: Bool = false
     
     var formattedVersion: String {
         // Remove any leading 'iOS-' or 'iOS' and replace dashes with dots
@@ -25,7 +26,7 @@ struct Simulator: Identifiable, Hashable {
         return "iOS " + cleaned
     }
     
-    enum DeviceType: String, CaseIterable {
+    enum DeviceType: String, CaseIterable, Codable {
         case iPhone = "iPhone"
         case iPad = "iPad"
         case appleTV = "Apple TV"
@@ -33,10 +34,14 @@ struct Simulator: Identifiable, Hashable {
         
         var icon: String {
             switch self {
-            case .iPhone: return "iphone"
-            case .iPad: return "ipad"
-            case .appleTV: return "appletv"
-            case .appleWatch: return "applewatch"
+            case .iPhone:
+                return "iphone"
+            case .iPad:
+                return "ipad"
+            case .appleTV:
+                return "tv"
+            case .appleWatch:
+                return "applewatch"
             }
         }
     }
