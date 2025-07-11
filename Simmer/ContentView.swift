@@ -276,11 +276,12 @@ struct SnapshotRowView: View {
     let snapshot: Snapshot
     let app: App
     @ObservedObject var simulatorService: SimulatorService
+    @State private var showingRestoreConfirmation = false
     
     var body: some View {
         HStack {
             Button(action: {
-                simulatorService.restoreSnapshot(snapshot, for: app)
+                showingRestoreConfirmation = true
             }) {
                 HStack {
                     Image(systemName: "arrow.clockwise")
@@ -324,6 +325,14 @@ struct SnapshotRowView: View {
             }
             .buttonStyle(PlainButtonStyle())
             .padding(.trailing, 8)
+        }
+        .alert("Restore Snapshot", isPresented: $showingRestoreConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Restore", role: .destructive) {
+                simulatorService.restoreSnapshot(snapshot, for: app)
+            }
+        } message: {
+            Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
         }
     }
 }

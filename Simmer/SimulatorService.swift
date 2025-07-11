@@ -504,8 +504,9 @@ class SimulatorService: ObservableObject {
             // Remove current documents
             try FileManager.default.removeItem(atPath: app.documentsPath)
             
-            // Copy snapshot to documents
-            try FileManager.default.copyItem(atPath: snapshot.path, toPath: app.documentsPath)
+            // Copy the Documents directory from the snapshot to the app's documents path
+            let snapshotDocumentsPath = "\(snapshot.path)/Documents"
+            try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
         } catch {
             print("Error restoring snapshot: \(error)")
         }
