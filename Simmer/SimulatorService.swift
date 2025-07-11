@@ -223,11 +223,39 @@ class SimulatorService: ObservableObject {
                 if let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
                     let bundleId = infoPlist["CFBundleIdentifier"] as? String
                     if bundleId == bundleIdentifier {
-                        if let iconFiles = infoPlist["CFBundleIcons"] as? [String: Any],
-                           let primaryIcon = iconFiles["CFBundlePrimaryIcon"] as? [String: Any],
-                           let iconFilesList = primaryIcon["CFBundleIconFiles"] as? [String],
-                           let firstIcon = iconFilesList.first {
-                            return "\(appPath)/\(firstIcon)@2x.png"
+                        // Look for the app bundle directory
+                        let appBundleContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
+                        for item in appBundleContents {
+                            if item.hasSuffix(".app") {
+                                let appBundlePath = "\(appPath)/\(item)"
+                                
+                                // Try different icon file patterns
+                                let iconPatterns = [
+                                    "AppIcon60x60@2x.png",
+                                    "AppIcon60x60.png",
+                                    "AppIcon76x76@2x~ipad.png",
+                                    "AppIcon76x76~ipad.png"
+                                ]
+                                
+                                for pattern in iconPatterns {
+                                    let iconPath = "\(appBundlePath)/\(pattern)"
+                                    if FileManager.default.fileExists(atPath: iconPath) {
+                                        print("Found app icon: \(iconPath)")
+                                        return iconPath
+                                    }
+                                }
+                                
+                                // If no specific icon found, try to find any PNG file that looks like an app icon
+                                if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
+                                    for file in bundleContents {
+                                        if file.hasPrefix("AppIcon") && file.hasSuffix(".png") {
+                                            let iconPath = "\(appBundlePath)/\(file)"
+                                            print("Found app icon: \(iconPath)")
+                                            return iconPath
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -254,13 +282,25 @@ class SimulatorService: ObservableObject {
                 let snapshotPath = "\(app.snapshotsPath)/\(snapshotDir)"
                 let attributes = try FileManager.default.attributesOfItem(atPath: snapshotPath)
                 let creationDate = attributes[.creationDate] as? Date ?? Date()
-                let fileSize = attributes[.size] as? Int64 ?? 0
+                
+                // Calculate the total size of all files in the snapshot directory
+                var totalSize: Int64 = 0
+                do {
+                    let enumerator = FileManager.default.enumerator(atPath: snapshotPath)
+                    while let file = enumerator?.nextObject() as? String {
+                        let filePath = "\(snapshotPath)/\(file)"
+                        let fileAttributes = try FileManager.default.attributesOfItem(atPath: filePath)
+                        totalSize += fileAttributes[.size] as? Int64 ?? 0
+                    }
+                } catch {
+                    print("Error calculating snapshot size for \(snapshotDir): \(error)")
+                }
                 
                 let snapshot = Snapshot(
                     id: snapshotDir,
                     name: snapshotDir,
                     date: creationDate,
-                    size: fileSize,
+                    size: totalSize,
                     path: snapshotPath
                 )
                 
