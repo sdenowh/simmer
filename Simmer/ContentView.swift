@@ -177,6 +177,10 @@ struct AppActionsView: View {
     let app: App
     @ObservedObject var simulatorService: SimulatorService
     
+    private var currentApp: App? {
+        simulatorService.apps.first { $0.id == app.id }
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Show Documents Folder
@@ -194,12 +198,12 @@ struct AppActionsView: View {
                     
                     Spacer()
                     
-                    if app.isLoadingDocumentsSize {
+                    if let currentApp = currentApp, currentApp.isLoadingDocumentsSize {
                         ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 12, height: 12)
+                            .scaleEffect(0.4)
+                            .frame(width: 8, height: 8)
                     } else {
-                        Text(DirectorySize(size: app.documentsSize).formattedSize)
+                        Text(DirectorySize(size: currentApp?.documentsSize ?? 0).formattedSize)
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -302,8 +306,8 @@ struct SnapshotRowView: View {
                     
                     if snapshot.isLoadingSize {
                         ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 12, height: 12)
+                            .scaleEffect(0.4)
+                            .frame(width: 8, height: 8)
                     } else {
                         Text(DirectorySize(size: snapshot.size).formattedSize)
                             .font(.system(size: 10))
