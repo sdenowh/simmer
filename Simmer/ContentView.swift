@@ -123,11 +123,14 @@ struct SimulatorRowView: View {
                     .foregroundColor(.secondary)
                     .padding(.trailing, 8)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+            .contentShape(Rectangle())
         }
         .buttonStyle(PlainButtonStyle())
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+        .background(Color.clear)
     }
 }
 
