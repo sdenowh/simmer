@@ -415,6 +415,8 @@ class SimulatorService: ObservableObject {
         }
     }
     
+
+    
     func getDirectorySize(for path: String) -> DirectorySize {
         var totalSize: Int64 = 0
         
@@ -484,36 +486,9 @@ class SimulatorService: ObservableObject {
                 try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
                 print("Created snapshot directory: \(snapshotPath)")
                 
-                // Copy Documents directory contents, excluding any existing Snapshots directory
-                let documentsContents = try FileManager.default.contentsOfDirectory(atPath: app.documentsPath)
-                for item in documentsContents {
-                    // Skip any existing Snapshots directory to avoid recursion
-                    if item == "Snapshots" {
-                        print("Skipping existing Snapshots directory to avoid recursion")
-                        continue
-                    }
-                    
-                    let sourcePath = "\(app.documentsPath)/\(item)"
-                    let destinationPath = "\(snapshotPath)/\(item)"
-                    
-                    print("Attempting to copy:")
-                    print("  Source: \(sourcePath)")
-                    print("  Destination: \(destinationPath)")
-                    
-                    // Check if the source item actually exists before trying to copy it
-                    if FileManager.default.fileExists(atPath: sourcePath) {
-                        do {
-                            // Try to read the file first to ensure it's accessible
-                            let data = try Data(contentsOf: URL(fileURLWithPath: sourcePath))
-                            try data.write(to: URL(fileURLWithPath: destinationPath))
-                            print("Copied: \(item)")
-                        } catch {
-                            print("Failed to copy \(item): \(error)")
-                        }
-                    } else {
-                        print("Skipping non-existent item: \(item)")
-                    }
-                }
+                // Copy the Documents directory itself to the snapshot
+                let documentsDestinationPath = "\(snapshotPath)/Documents"
+                try FileManager.default.copyItem(atPath: app.documentsPath, toPath: documentsDestinationPath)
                 loadSnapshots(for: app)
                 print("Snapshot created successfully: \(snapshotName)")
             } else {
