@@ -324,6 +324,18 @@ struct SnapshotRowView: View {
     @ObservedObject var simulatorService: SimulatorService
     @State private var showingRestoreConfirmation = false
     
+    private var currentApp: App? {
+        simulatorService.apps.first { $0.id == app.id }
+    }
+    
+    private var displayApp: App {
+        if let currentApp = currentApp {
+            return currentApp
+        } else {
+            return app
+        }
+    }
+    
     var body: some View {
         HStack {
             Button(action: {
@@ -372,13 +384,29 @@ struct SnapshotRowView: View {
             .buttonStyle(PlainButtonStyle())
             .padding(.trailing, 8)
         }
-        .alert("Restore Snapshot", isPresented: $showingRestoreConfirmation) {
+        .confirmationDialog("Restore Snapshot", isPresented: $showingRestoreConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Restore", role: .destructive) {
-                simulatorService.restoreSnapshot(snapshot, for: app)
+                simulatorService.restoreSnapshot(snapshot, for: displayApp)
             }
         } message: {
-            Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
+            VStack(spacing: 8) {
+                // App icon
+                if let iconPath = displayApp.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .frame(width: 32, height: 32)
+                        .cornerRadius(6)
+                } else {
+                    Image(systemName: "app")
+                        .foregroundColor(.gray)
+                        .frame(width: 32, height: 32)
+                }
+                
+                Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
+                    .font(.system(size: 12))
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 }
