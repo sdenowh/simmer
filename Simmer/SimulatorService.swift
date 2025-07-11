@@ -530,7 +530,19 @@ class SimulatorService: ObservableObject {
             let snapshotDirectories = try FileManager.default.contentsOfDirectory(atPath: app.snapshotsPath)
             
             for snapshotDir in snapshotDirectories {
+                // Skip system files like .DS_Store
+                if snapshotDir.hasPrefix(".") {
+                    continue
+                }
+                
                 let snapshotPath = "\(app.snapshotsPath)/\(snapshotDir)"
+                
+                // Verify it's actually a directory
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: snapshotPath, isDirectory: &isDirectory) && isDirectory.boolValue else {
+                    continue
+                }
+                
                 let attributes = try FileManager.default.attributesOfItem(atPath: snapshotPath)
                 let creationDate = attributes[.creationDate] as? Date ?? Date()
                 
