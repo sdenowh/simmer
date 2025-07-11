@@ -8,6 +8,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    private func getAppVersion() -> String {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+           let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+            return "\(version) (\(build))"
+        }
+        return "Unknown"
+    }
     @StateObject private var simulatorService = SimulatorService()
     @State private var selectedSimulator: Simulator?
     @State private var selectedApp: App?
@@ -26,6 +33,11 @@ struct ContentView: View {
                     Button("Refresh Simulators") {
                         simulatorService.loadSimulators()
                     }
+                    
+                    Divider()
+                    
+                    Text("Version \(getAppVersion())")
+                        .disabled(true)
                     
                     Divider()
                     
