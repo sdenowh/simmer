@@ -13,7 +13,11 @@ class SimulatorService: ObservableObject {
     private let logger = Logger(subsystem: "com.simmer.app", category: "SimulatorService")
     
     private func log(_ message: String, type: OSLogType = .default) {
+        // Use NSLog for release builds to ensure visibility in Console.app
+        #if DEBUG
         logger.log(level: type, "\(message)")
+        #endif
+        NSLog("[Simmer] \(message)")
         print("[Simmer] \(message)")
     }
     
