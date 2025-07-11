@@ -89,44 +89,42 @@ struct SimulatorRowView: View {
     @ObservedObject var simulatorService: SimulatorService
     
     var body: some View {
-        HStack {
-            Button(action: onTap) {
-                HStack {
-                    Image(systemName: simulator.deviceType.icon)
-                        .foregroundColor(.blue)
-                        .frame(width: 20)
+        Button(action: onTap) {
+            HStack {
+                Image(systemName: simulator.deviceType.icon)
+                    .foregroundColor(.blue)
+                    .frame(width: 20)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(simulator.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.primary)
                     
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(simulator.name)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.primary)
-                        
-                        Text(simulator.formattedVersion)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Spacer()
+                    Text(simulator.formattedVersion)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
                 }
+                
+                Spacer()
+                
+                // Pin button
+                Button(action: {
+                    simulatorService.togglePin(for: simulator)
+                }) {
+                    Image(systemName: simulator.isPinned ? "pin.fill" : "pin")
+                        .foregroundColor(simulator.isPinned ? .orange : .secondary)
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                // Disclosure chevron
+                Image(systemName: isSelected ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(.trailing, 8)
             }
-            .buttonStyle(PlainButtonStyle())
-            
-            // Pin button
-            Button(action: {
-                simulatorService.togglePin(for: simulator)
-            }) {
-                Image(systemName: simulator.isPinned ? "pin.fill" : "pin")
-                    .foregroundColor(simulator.isPinned ? .orange : .secondary)
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(PlainButtonStyle())
-            
-            // Disclosure chevron
-            Image(systemName: isSelected ? "chevron.down" : "chevron.right")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .padding(.trailing, 8)
         }
+        .buttonStyle(PlainButtonStyle())
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
