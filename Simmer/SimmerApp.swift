@@ -82,6 +82,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     
     func popoverDidShow(_ notification: Notification) {
         appState.popoverAppearanceCount += 1
+        
+        // Refresh disk usage for expanded apps
         simulatorService.refreshSelectedAppDiskUsage()
+        
+        // Refresh documents size for all apps in the current simulator
+        if let selectedSimulator = simulatorService.selectedSimulator {
+            print("Refreshing documents size for all apps in simulator: \(selectedSimulator.name)")
+            
+            // Force a complete refresh of the apps list which will recalculate all document sizes
+            simulatorService.objectWillChange.send()
+            simulatorService.loadApps(for: selectedSimulator)
+        }
     }
 }
