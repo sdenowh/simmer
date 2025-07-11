@@ -384,30 +384,62 @@ struct SnapshotRowView: View {
             .buttonStyle(PlainButtonStyle())
             .padding(.trailing, 8)
         }
-        .confirmationDialog("Restore Snapshot", isPresented: $showingRestoreConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Restore", role: .destructive) {
-                simulatorService.restoreSnapshot(snapshot, for: displayApp)
+        .sheet(isPresented: $showingRestoreConfirmation) {
+            RestoreConfirmationView(
+                snapshot: snapshot,
+                app: displayApp,
+                simulatorService: simulatorService,
+                isPresented: $showingRestoreConfirmation
+            )
+        }
+    }
+}
+
+struct RestoreConfirmationView: View {
+    let snapshot: Snapshot
+    let app: App
+    @ObservedObject var simulatorService: SimulatorService
+    @Binding var isPresented: Bool
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            // App icon
+            if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                Image(nsImage: image)
+                    .resizable()
+                    .frame(width: 64, height: 64)
+                    .cornerRadius(12)
+            } else {
+                Image(systemName: "app")
+                    .foregroundColor(.gray)
+                    .frame(width: 64, height: 64)
+                    .font(.system(size: 32))
             }
-        } message: {
-            VStack(spacing: 8) {
-                // App icon
-                if let iconPath = displayApp.iconPath, let image = NSImage(contentsOfFile: iconPath) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .frame(width: 32, height: 32)
-                        .cornerRadius(6)
-                } else {
-                    Image(systemName: "app")
-                        .foregroundColor(.gray)
-                        .frame(width: 32, height: 32)
+            
+            Text("Restore Snapshot")
+                .font(.headline)
+            
+            Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
+                .font(.system(size: 14))
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    isPresented = false
                 }
+                .buttonStyle(.bordered)
                 
-                Text("This will replace the current Documents folder with the snapshot from \(snapshot.date, style: .date). This action cannot be undone.")
-                    .font(.system(size: 12))
-                    .multilineTextAlignment(.center)
+                Button("Restore") {
+                    simulatorService.restoreSnapshot(snapshot, for: app)
+                    isPresented = false
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
             }
         }
+        .padding(24)
+        .frame(width: 300)
     }
 }
 
