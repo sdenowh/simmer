@@ -98,7 +98,7 @@ struct SimulatorRowView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.primary)
                     
-                    Text("iOS \(simulator.iOSVersion)")
+                    Text(simulator.formattedVersion)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }

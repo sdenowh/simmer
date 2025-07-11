@@ -16,6 +16,15 @@ struct Simulator: Identifiable, Hashable {
     let udid: String
     let dataPath: String
     
+    var formattedVersion: String {
+        // Remove any leading 'iOS-' or 'iOS' and replace dashes with dots
+        let cleaned = iOSVersion.replacingOccurrences(of: "iOS-", with: "")
+                                 .replacingOccurrences(of: "iOS", with: "")
+                                 .replacingOccurrences(of: "-", with: ".")
+                                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        return "iOS " + cleaned
+    }
+    
     enum DeviceType: String, CaseIterable {
         case iPhone = "iPhone"
         case iPad = "iPad"
