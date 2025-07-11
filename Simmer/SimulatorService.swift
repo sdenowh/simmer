@@ -328,15 +328,30 @@ class SimulatorService: ObservableObject {
         do {
             let bundleDirectories = try FileManager.default.contentsOfDirectory(atPath: bundlePath)
             for bundleDir in bundleDirectories {
+                // Skip system files like .DS_Store
+                if bundleDir.hasPrefix(".") {
+                    continue
+                }
+                
                 let appPath = "\(bundlePath)/\(bundleDir)"
                 
-                // Check if app path exists
+                // Check if app path exists and is a directory
                 guard FileManager.default.fileExists(atPath: appPath) else {
+                    continue
+                }
+                
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: appPath, isDirectory: &isDirectory) && isDirectory.boolValue else {
                     continue
                 }
                 
                 let appBundleContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
                 for item in appBundleContents {
+                    // Skip system files like .DS_Store
+                    if item.hasPrefix(".") {
+                        continue
+                    }
+                    
                     if item.hasSuffix(".app") {
                         let appBundlePath = "\(appPath)/\(item)"
                         let infoPlistPath = "\(appBundlePath)/Info.plist"
@@ -391,6 +406,11 @@ class SimulatorService: ObservableObject {
                                 // Fallback: scan for any AppIcon*.png
                                 if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
                                     for file in bundleContents {
+                                        // Skip system files like .DS_Store
+                                        if file.hasPrefix(".") {
+                                            continue
+                                        }
+                                        
                                         if file.hasPrefix("AppIcon") && file.hasSuffix(".png") {
                                             let iconPath = "\(appBundlePath)/\(file)"
                                             log("Found app icon (fallback): \(iconPath)")
@@ -402,6 +422,11 @@ class SimulatorService: ObservableObject {
                                 // Additional fallback: scan for any .png files that might be icons
                                 if let bundleContents = try? FileManager.default.contentsOfDirectory(atPath: appBundlePath) {
                                     for file in bundleContents {
+                                        // Skip system files like .DS_Store
+                                        if file.hasPrefix(".") {
+                                            continue
+                                        }
+                                        
                                         if file.hasSuffix(".png") && (file.contains("Icon") || file.contains("icon")) {
                                             let iconPath = "\(appBundlePath)/\(file)"
                                             log("Found app icon (additional fallback): \(iconPath)")
@@ -446,6 +471,11 @@ class SimulatorService: ObservableObject {
             do {
                 let appContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
                 for appName in appContents {
+                    // Skip system files like .DS_Store
+                    if appName.hasPrefix(".") {
+                        continue
+                    }
+                    
                     if appName.hasSuffix(".app") {
                         let fullAppPath = "\(appPath)/\(appName)"
                         let infoPlistPath = "\(fullAppPath)/Contents/Info.plist"
@@ -464,6 +494,11 @@ class SimulatorService: ObservableObject {
                                 let resourcePath = "\(fullAppPath)/Contents/Resources"
                                 if let resourceContents = try? FileManager.default.contentsOfDirectory(atPath: resourcePath) {
                                     for file in resourceContents {
+                                        // Skip system files like .DS_Store
+                                        if file.hasPrefix(".") {
+                                            continue
+                                        }
+                                        
                                         if file.hasSuffix(".icns") || (file.hasSuffix(".png") && file.contains("Icon")) {
                                             let iconPath = "\(resourcePath)/\(file)"
                                             return iconPath
