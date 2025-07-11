@@ -117,30 +117,32 @@ struct ContentView: View {
                     }
                 }
                 
-                            // Progress Bar Overlay for Snapshot Operations
+                // Progress Bar Overlay for Snapshot Operations
             if simulatorService.isSnapshotOperationInProgress {
                 VStack {
                     Spacer()
                     
                     VStack(spacing: 4) {
                         Text(simulatorService.snapshotOperationMessage)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundColor(.white)
                             .multilineTextAlignment(.center)
                         
                         ProgressView(value: simulatorService.snapshotOperationProgress)
-                            .progressViewStyle(LinearProgressViewStyle(tint: .white))
+                            .progressViewStyle(LinearProgressViewStyle(tint: .blue))
                             .scaleEffect(y: 0.8)
                         
                         Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
-                            .font(.system(size: 9))
+                            .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.8))
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(
-                        VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+                        VisualEffectView(material: .headerView, blendingMode: .behindWindow)
                     )
+//                    .cornerRadius(12)
+                    .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
                 }
                 .allowsHitTesting(false)
                 .transition(.asymmetric(
