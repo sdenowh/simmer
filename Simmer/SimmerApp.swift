@@ -37,6 +37,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupPopover()
+        // Show the popover automatically on launch, after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            self.togglePopover()
+        }
     }
     
     private func setupStatusItem() {
