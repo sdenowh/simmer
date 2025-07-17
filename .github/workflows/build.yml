@@ -1,0 +1,62 @@
+name: Build Simmer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.0'
+
+      - name: Cache Xcode derived data
+        uses: actions/cache@v3
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-xcode-${{ hashFiles('**/*.xcodeproj') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-
+
+      - name: Build for Release
+        run: |
+          xcodebuild -project Simmer.xcodeproj \
+            -scheme Simmer \
+            -configuration Release \
+            -derivedDataPath build \
+            build
+
+      - name: Create app bundle
+        run: |
+          mkdir -p Simmer.app/Contents/MacOS
+          mkdir -p Simmer.app/Contents/Resources
+          cp build/Build/Products/Release/Simmer Simmer.app/Contents/MacOS/
+          cp Simmer/Info.plist Simmer.app/Contents/
+          cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
+          chmod +x Simmer.app/Contents/MacOS/Simmer
+
+      - name: Create DMG
+        run: |
+          mkdir -p dmg_temp
+          cp -r Simmer.app dmg_temp/
+          hdiutil create -volname "Simmer" -srcfolder dmg_temp -ov -format UDZO Simmer.dmg
+          rm -rf dmg_temp
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: simmer-app
+          path: |
+            Simmer.app
+            Simmer.dmg 

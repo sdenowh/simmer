@@ -2,9 +2,6 @@
 
 echo "Building Simmer menubar application..."
 
-# Navigate to the project directory
-cd Simmer
-
 # Build the project
 xcodebuild -project Simmer.xcodeproj -scheme Simmer -configuration Debug build
 
