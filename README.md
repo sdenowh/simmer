@@ -88,7 +88,6 @@ Simmer/
 │   ├── SimulatorService.swift # iOS Simulator service
 │   ├── Info.plist            # App configuration
 │   └── Assets.xcassets/      # App assets
-├── Simmer-from-cursor/       # Original files from Cursor
 ├── build.sh                  # Build script
 └── README.md                 # This file
 ```
