@@ -778,24 +778,45 @@ class SimulatorService: ObservableObject {
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                DispatchQueue.main.async {
-                    self.snapshotOperationProgress = 0.3
-                    self.snapshotOperationMessage = "Removing current documents..."
-                }
-                
-                // Remove current documents
-                try FileManager.default.removeItem(atPath: app.documentsPath)
-                
-                DispatchQueue.main.async {
-                    self.snapshotOperationProgress = 0.6
-                    self.snapshotOperationMessage = "Restoring snapshot documents..."
-                }
-                
-                // Copy the Documents directory from the snapshot to the app's documents path
-                let snapshotDocumentsPath = "\(snapshot.path)/Documents"
-                try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
-                
+            self.performRestoreWithRetry(snapshot: snapshot, app: app, attempt: 1)
+        }
+    }
+    
+    private func performRestoreWithRetry(snapshot: Snapshot, app: App, attempt: Int) {
+        do {
+            DispatchQueue.main.async {
+                self.snapshotOperationProgress = 0.2
+                self.snapshotOperationMessage = "Removing current documents..."
+            }
+            
+            // Remove current documents
+            try FileManager.default.removeItem(atPath: app.documentsPath)
+            
+            DispatchQueue.main.async {
+                self.snapshotOperationProgress = 0.5
+                self.snapshotOperationMessage = "Restoring snapshot documents..."
+            }
+            
+            // Copy the Documents directory from the snapshot to the apps documents path
+            let snapshotDocumentsPath = "\(snapshot.path)/Documents"
+            try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
+            
+            DispatchQueue.main.async {
+                self.snapshotOperationProgress = 0.8
+                self.snapshotOperationMessage = "Waiting for file system to complete..."
+            }
+            
+            // Wait 0.5ds for file system actions to complete
+            Thread.sleep(forTimeInterval: 0.5)
+            DispatchQueue.main.async {
+                self.snapshotOperationProgress = 0.9
+                self.snapshotOperationMessage = "Validating restore..."
+            }
+            
+            // Validate the restore by comparing files
+            let isValid = self.validateRestore(snapshot: snapshot, app: app)
+            
+            if isValid {
                 DispatchQueue.main.async {
                     self.snapshotOperationProgress = 1.0
                     self.snapshotOperationMessage = "Snapshot restored successfully!"
@@ -807,20 +828,130 @@ class SimulatorService: ObservableObject {
                         self.snapshotOperationMessage = ""
                     }
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.isSnapshotOperationInProgress = false
-                    self.snapshotOperationMessage = "Error restoring snapshot: \(error.localizedDescription)"
+                self.log("Snapshot restored successfully on attempt \(attempt)")
+            } else {
+                if attempt < 2 {
+                    self.log("Restore validation failed on attempt \(attempt), retrying...")
+                    DispatchQueue.main.async {
+                        self.snapshotOperationProgress = 0.1
+                        self.snapshotOperationMessage = "Validation failed, retrying restore..."
+                    }
                     
-                    // Reset progress after a short delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                        self.snapshotOperationProgress = 0.0
-                        self.snapshotOperationMessage = ""
+                    // Wait a bit before retry
+                    Thread.sleep(forTimeInterval: 0.3)
+                    
+                    // Retry the restore
+                    self.performRestoreWithRetry(snapshot: snapshot, app: app, attempt: attempt + 1)
+                } else {
+                    DispatchQueue.main.async {
+                        self.isSnapshotOperationInProgress = false
+                        self.snapshotOperationMessage = "Snapshot restore failed after 2 attempts. Files may be corrupted or incomplete."
+                        
+                        // Reset progress after a longer delay for error
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                            self.snapshotOperationProgress = 0.0
+                            self.snapshotOperationMessage = ""
+                        }
+                    }
+                    self.log("Snapshot restore failed after 2 attempts", type: .error)
+                }
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.isSnapshotOperationInProgress = false
+                self.snapshotOperationMessage = "Error restoring snapshot: \(error.localizedDescription)"
+                
+                // Reset progress after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self.snapshotOperationProgress = 0.0
+                    self.snapshotOperationMessage = ""
+                }
+            }
+            self.log("Error restoring snapshot on attempt \(attempt): \(error)", type: .error)
+        }
+    }
+    
+    private func validateRestore(snapshot: Snapshot, app: App) -> Bool {
+        let snapshotDocumentsPath = "\(snapshot.path)/Documents"
+        let restoredDocumentsPath = app.documentsPath
+        
+        // Check if both directories exist
+        guard FileManager.default.fileExists(atPath: snapshotDocumentsPath),
+              FileManager.default.fileExists(atPath: restoredDocumentsPath) else {
+            self.log("Validation failed: One or both directories don't exist", type: .error)
+            return false
+        }
+        
+        do {
+            // Get all files from both directories recursively
+            let snapshotFiles = try getAllFilesRecursively(at: snapshotDocumentsPath)
+            let restoredFiles = try getAllFilesRecursively(at: restoredDocumentsPath)
+            
+            // Compare file counts
+            if snapshotFiles.count != restoredFiles.count {
+                self.log("Validation failed: File count mismatch. Snapshot: \(snapshotFiles.count), Restored: \(restoredFiles.count)", type: .error)
+                return false
+            }
+            
+            // Compare file sizes and names
+            for (index, snapshotFile) in snapshotFiles.enumerated() {
+                let restoredFile = restoredFiles[index]
+                
+                // Compare relative paths
+                if snapshotFile.relativePath != restoredFile.relativePath {
+                    self.log("Validation failed: File path mismatch at index \(index)", type: .error)
+                    return false
+                }
+                
+                // Compare file sizes
+                if snapshotFile.size != restoredFile.size {
+                    self.log("Validation failed: File size mismatch for \(snapshotFile.relativePath). Snapshot: \(snapshotFile.size), Restored: \(restoredFile.size)", type: .error)
+                    return false
+                }
+            }
+            
+            self.log("Validation successful: All \(snapshotFiles.count) files restored correctly")
+            return true
+            
+        } catch {
+            self.log("Validation failed with error: \(error)", type: .error)
+            return false
+        }
+    }
+    
+    private struct FileInfo {
+        let relativePath: String
+        let size: Int64
+    }
+    
+    private func getAllFilesRecursively(at path: String) throws -> [FileInfo] {
+        var files: [FileInfo] = []
+        let basePath = path
+        
+        func enumerateFiles(at currentPath: String, relativePath: String = "") throws {
+            let contents = try FileManager.default.contentsOfDirectory(atPath: currentPath)
+            
+            for item in contents {
+                let fullPath = "\(currentPath)/\(item)"
+                let itemRelativePath = relativePath.isEmpty ? item : "\(relativePath)/\(item)"
+                
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
+                    if isDirectory.boolValue {
+                        // Recursively enumerate subdirectories
+                        try enumerateFiles(at: fullPath, relativePath: itemRelativePath)
+                    } else {
+                        // Add file to our list
+                        let attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
+                        let size = attributes[.size] as? Int64 ?? 0
+                        files.append(FileInfo(relativePath: itemRelativePath, size: size))
                     }
                 }
-                self.log("Error restoring snapshot: \(error)", type: .error)
             }
         }
+        
+        try enumerateFiles(at: basePath)
+        return files.sorted { $0.relativePath < $1.relativePath }
     }
     
     func deleteSnapshot(_ snapshot: Snapshot) {
