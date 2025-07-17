@@ -666,18 +666,103 @@ class SimulatorService: ObservableObject {
         return DirectorySize(size: totalSnapshotsSize)
     }
     
+    // MARK: - Path Validation and Refresh
+    
+    private func validateAppPaths(_ app: App) -> Bool {
+        let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
+        let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
+        
+        log("Validating paths for \(app.name):")
+        log("Documents path: \(app.documentsPath) - exists: \(documentsExists)")
+        log("Snapshots path: \(app.snapshotsPath) - exists: \(snapshotsExists)")
+        
+        return documentsExists && snapshotsExists
+    }
+    
+    private func refreshSimulatorDataIfNeeded(for app: App) -> Bool {
+        // If paths are valid, no refresh needed
+        if validateAppPaths(app) {
+            log("Paths are valid for \(app.name), no refresh needed")
+            return true
+        }
+        
+        log("Paths are invalid for \(app.name), refreshing simulator data...")
+        
+        // Refresh the current simulators data
+        if let selectedSimulator = selectedSimulator {
+            log("Refreshing data for simulator: \(selectedSimulator.name)")
+            
+            // Reload apps for the current simulator
+            loadApps(for: selectedSimulator)
+            
+            // Try to find the updated app
+            if let updatedApp = apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+                log("Found updated app: \(updatedApp.name)")
+                
+                // Update the selected app if it's the same one
+                if selectedApp?.bundleIdentifier == app.bundleIdentifier {
+                    selectedApp = updatedApp
+                    log("Updated selected app to: \(updatedApp.name)")
+                }
+                
+                // Validate the updated app's paths
+                if validateAppPaths(updatedApp) {
+                    log("Updated app paths are valid")
+                    return true
+                } else {
+                    log("Updated app paths are still invalid", type: .error)
+                    return false
+                }
+            } else {
+                log("Could not find updated app for bundle identifier: \(app.bundleIdentifier)", type: .error)
+                return false
+            }
+        } else {
+            log("No selected simulator to refresh", type: .error)
+            return false
+        }
+    }
+    
+    private func getValidatedApp(_ app: App) -> App? {
+        // First try to validate the current app
+        if validateAppPaths(app) {
+            return app
+        }
+        
+        // If validation fails, try to refresh and get the updated app
+        if refreshSimulatorDataIfNeeded(for: app) {
+            // Return the updated app from the refreshed data
+            return apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier })
+        }
+        
+        return nil
+    }
+    
+    // MARK: - Updated Functions with Path Validation
+    
     func openDocumentsFolder(for app: App) {
-        NSWorkspace.shared.open(URL(fileURLWithPath: app.documentsPath))
+        guard let validatedApp = getValidatedApp(app) else {
+            log("Could not validate paths for \(app.name), cannot open documents folder", type: .error)
+            return
+        }
+        
+        log("Opening documents folder for \(validatedApp.name)")
+        NSWorkspace.shared.open(URL(fileURLWithPath: validatedApp.documentsPath))
     }
     
     func takeSnapshot(for app: App) {
+        guard let validatedApp = getValidatedApp(app) else {
+            log("Could not validate paths for \(app.name), cannot take snapshot", type: .error)
+            return
+        }
+        
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let snapshotName = "snapshot_\(timestamp)"
-        let snapshotPath = "\(app.snapshotsPath)/\(snapshotName)"
+        let snapshotPath = "\(validatedApp.snapshotsPath)/\(snapshotName)"
         
-        log("Taking snapshot for \(app.name)")
-        log("Documents path: \(app.documentsPath)")
-        log("Snapshots path: \(app.snapshotsPath)")
+        log("Taking snapshot for \(validatedApp.name)")
+        log("Documents path: \(validatedApp.documentsPath)")
+        log("Snapshots path: \(validatedApp.snapshotsPath)")
         log("Snapshot path: \(snapshotPath)")
         
         // Start progress tracking
@@ -690,7 +775,7 @@ class SimulatorService: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 // Check if Documents directory exists
-                let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
+                let documentsExists = FileManager.default.fileExists(atPath: validatedApp.documentsPath)
                 self.log("Documents directory exists: \(documentsExists)")
                 
                 if documentsExists {
@@ -700,11 +785,11 @@ class SimulatorService: ObservableObject {
                     }
                     
                     // Create Snapshots directory if it doesn't exist
-                    let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
+                    let snapshotsExists = FileManager.default.fileExists(atPath: validatedApp.snapshotsPath)
                     self.log("Snapshots directory exists: \(snapshotsExists)")
                     
                     if !snapshotsExists {
-                        try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
+                        try FileManager.default.createDirectory(atPath: validatedApp.snapshotsPath, withIntermediateDirectories: true)
                         self.log("Created snapshots directory")
                     }
                     
@@ -719,7 +804,7 @@ class SimulatorService: ObservableObject {
                     
                     // Copy the Documents directory itself to the snapshot
                     let documentsDestinationPath = "\(snapshotPath)/Documents"
-                    try FileManager.default.copyItem(atPath: app.documentsPath, toPath: documentsDestinationPath)
+                    try FileManager.default.copyItem(atPath: validatedApp.documentsPath, toPath: documentsDestinationPath)
                     
                     DispatchQueue.main.async {
                         self.snapshotOperationProgress = 0.8
@@ -727,7 +812,7 @@ class SimulatorService: ObservableObject {
                     }
                     
                     DispatchQueue.main.async {
-                        self.loadSnapshots(for: app)
+                        self.loadSnapshots(for: validatedApp)
                         self.isSnapshotOperationInProgress = false
                         self.snapshotOperationProgress = 1.0
                         self.snapshotOperationMessage = "Snapshot created successfully!"
@@ -751,7 +836,7 @@ class SimulatorService: ObservableObject {
                             self.snapshotOperationMessage = ""
                         }
                     }
-                    self.log("Documents directory does not exist for \(app.name)")
+                    self.log("Documents directory does not exist for \(validatedApp.name)")
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -770,6 +855,11 @@ class SimulatorService: ObservableObject {
     }
     
     func restoreSnapshot(_ snapshot: Snapshot, for app: App) {
+        guard let validatedApp = getValidatedApp(app) else {
+            log("Could not validate paths for \(app.name), cannot restore snapshot", type: .error)
+            return
+        }
+        
         // Start progress tracking
         DispatchQueue.main.async {
             self.isSnapshotOperationInProgress = true
@@ -778,7 +868,7 @@ class SimulatorService: ObservableObject {
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            self.performRestoreWithRetry(snapshot: snapshot, app: app, attempt: 1)
+            self.performRestoreWithRetry(snapshot: snapshot, app: validatedApp, attempt: 1)
         }
     }
     
@@ -955,6 +1045,28 @@ class SimulatorService: ObservableObject {
     }
     
     func deleteSnapshot(_ snapshot: Snapshot) {
+        // For delete operations, we need to validate the snapshot path
+        guard FileManager.default.fileExists(atPath: snapshot.path) else {
+            log("Snapshot path does not exist: \(snapshot.path)", type: .error)
+            
+            // Try to refresh and find the updated snapshot
+            if let selectedApp = selectedApp {
+                loadSnapshots(for: selectedApp)
+                
+                // Try to find the snapshot again
+                if let updatedSnapshot = snapshots.first(where: { $0.id == snapshot.id }) {
+                    if FileManager.default.fileExists(atPath: updatedSnapshot.path) {
+                        log("Found updated snapshot, retrying delete")
+                        deleteSnapshot(updatedSnapshot)
+                        return
+                    }
+                }
+            }
+            
+            log("Could not find valid snapshot to delete", type: .error)
+            return
+        }
+        
         do {
             try FileManager.default.removeItem(atPath: snapshot.path)
             loadSnapshots(for: selectedApp!)
@@ -964,7 +1076,18 @@ class SimulatorService: ObservableObject {
     }
     
     func deleteAllSnapshots() {
+        // Validate all apps before proceeding
+        var validApps: [App] = []
+        
         for app in apps {
+            if let validatedApp = getValidatedApp(app) {
+                validApps.append(validatedApp)
+            } else {
+                log("Skipping invalid app: \(app.name)", type: .error)
+            }
+        }
+        
+        for app in validApps {
             do {
                 let snapshotDirectories = try FileManager.default.contentsOfDirectory(atPath: app.snapshotsPath)
                 for snapshotDir in snapshotDirectories {
@@ -972,7 +1095,7 @@ class SimulatorService: ObservableObject {
                     try FileManager.default.removeItem(atPath: snapshotPath)
                 }
             } catch {
-                log("Error deleting snapshots: \(error)", type: .error)
+                log("Error deleting snapshots for \(app.name): \(error)", type: .error)
             }
         }
         
