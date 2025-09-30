@@ -88,6 +88,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover?.behavior = .transient
         popover?.delegate = self
         let hostingController = NSHostingController(rootView: ContentView(appState: appState, simulatorService: simulatorService).environmentObject(popoverWindowProvider))
+        // Force dark appearance for the popover content
+        hostingController.view.appearance = NSAppearance(named: .darkAqua)
         popover?.contentViewController = hostingController
         // Set window reference after popover is shown
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -105,6 +107,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     if let window = self.popover?.contentViewController?.view.window {
                         self.popoverWindowProvider.window = window
+                        // Ensure the popover window uses dark appearance
+                        window.appearance = NSAppearance(named: .darkAqua)
                     }
                 }
             }

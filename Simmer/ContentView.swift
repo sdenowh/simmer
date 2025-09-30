@@ -68,12 +68,17 @@ struct ContentView: View {
                 .menuIndicator(.hidden)
             }
             .padding()
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(
+                VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow)
+            )
             
             Divider()
             
             // Content
             ZStack {
+                // Root background
+                VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow)
+                    .ignoresSafeArea()
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(simulatorService.simulators) { simulator in
@@ -139,7 +144,7 @@ struct ContentView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(
-                        VisualEffectView(material: .headerView, blendingMode: .behindWindow)
+                        VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                     )
 //                    .cornerRadius(12)
                     .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
