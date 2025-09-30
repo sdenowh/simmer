@@ -142,9 +142,9 @@ class SimulatorService: ObservableObject {
                 calculateTotalSnapshotsSize()
             }
             
-            // Ensure the app is in the apps array and has loading state set
+            // Always refresh documents size for the expanded app to keep sizes accurate
             if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
-                if !apps[appIndex].isLoadingDocumentsSize && apps[appIndex].documentsSize == 0 && !apps[appIndex].documentsPath.isEmpty {
+                if !apps[appIndex].documentsPath.isEmpty {
                     apps[appIndex].startLoadingDocumentsSize()
                     calculateDocumentsSize(for: apps[appIndex]) { calculatedSize in
                         DispatchQueue.main.async {
