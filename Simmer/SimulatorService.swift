@@ -1029,6 +1029,7 @@ class SimulatorService: ObservableObject {
             
             if isValid {
                 DispatchQueue.main.async {
+                    self.loadSnapshots(for: app)
                     self.snapshotOperationProgress = 1.0
                     self.snapshotOperationMessage = "Snapshot restored successfully!"
                     self.isSnapshotOperationInProgress = false
