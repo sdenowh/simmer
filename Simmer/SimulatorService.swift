@@ -852,26 +852,59 @@ class SimulatorService: ObservableObject {
                     // Copy the Documents directory itself to the snapshot
                     let documentsDestinationPath = "\(snapshotPath)/Documents"
                     try FileManager.default.copyItem(atPath: validatedApp.documentsPath, toPath: documentsDestinationPath)
-                    
+
+                    // Validate the snapshot integrity against the source Documents
                     DispatchQueue.main.async {
-                        self.snapshotOperationProgress = 0.8
-                        self.snapshotOperationMessage = "Finalizing snapshot..."
+                        self.snapshotOperationProgress = 0.6
+                        self.snapshotOperationMessage = "Validating snapshot..."
                     }
-                    
-                    DispatchQueue.main.async {
-                        self.loadSnapshots(for: validatedApp)
-                        self.isSnapshotOperationInProgress = false
-                        self.snapshotOperationProgress = 1.0
-                        self.snapshotOperationMessage = "Snapshot created successfully!"
-                        
-                        // Reset progress after a short delay
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            self.snapshotOperationProgress = 0.0
-                            self.snapshotOperationMessage = ""
+
+                    let isValid = self.validateSnapshot(sourcePath: validatedApp.documentsPath, snapshotDocumentsPath: documentsDestinationPath)
+
+                    if isValid {
+                        DispatchQueue.main.async {
+                            self.snapshotOperationProgress = 0.8
+                            self.snapshotOperationMessage = "Finalizing snapshot..."
                         }
+
+                        DispatchQueue.main.async {
+                            self.loadSnapshots(for: validatedApp)
+                            self.isSnapshotOperationInProgress = false
+                            self.snapshotOperationProgress = 1.0
+                            self.snapshotOperationMessage = "Snapshot created successfully!"
+                            
+                            // Reset progress after a short delay
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                self.snapshotOperationProgress = 0.0
+                                self.snapshotOperationMessage = ""
+                            }
+                        }
+                        
+                        self.log("Snapshot created successfully: \(snapshotName)")
+                    } else {
+                        // Clean up the incomplete snapshot folder
+                        do {
+                            try FileManager.default.removeItem(atPath: snapshotPath)
+                            self.log("Removed incomplete snapshot at: \(snapshotPath)")
+                        } catch {
+                            self.log("Failed to remove incomplete snapshot at \(snapshotPath): \(error)", type: .error)
+                        }
+
+                        // Surface a clear error message to the user and keep the HUD visible briefly
+                        DispatchQueue.main.async {
+                            self.snapshotOperationProgress = 1.0
+                            self.snapshotOperationMessage = "Snapshot failed: Some files could not be copied. Close the app using these files and try again."
+                            
+                            // Hide after a delay
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                                self.isSnapshotOperationInProgress = false
+                                self.snapshotOperationProgress = 0.0
+                                self.snapshotOperationMessage = ""
+                            }
+                        }
+
+                        self.log("Snapshot validation failed for \(validatedApp.name). Likely due to files in use during copy.", type: .error)
                     }
-                    
-                    self.log("Snapshot created successfully: \(snapshotName)")
                 } else {
                     DispatchQueue.main.async {
                         self.isSnapshotOperationInProgress = false
@@ -887,17 +920,58 @@ class SimulatorService: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.isSnapshotOperationInProgress = false
+                    // Keep HUD visible to show the error, then hide
+                    self.snapshotOperationProgress = 1.0
                     self.snapshotOperationMessage = "Error taking snapshot: \(error.localizedDescription)"
                     
-                    // Reset progress after a short delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                        self.isSnapshotOperationInProgress = false
                         self.snapshotOperationProgress = 0.0
                         self.snapshotOperationMessage = ""
                     }
                 }
                 self.log("Error taking snapshot: \(error)", type: .error)
             }
+        }
+    }
+
+    // Validates that the snapshot at snapshotDocumentsPath matches the source at sourcePath
+    // by comparing recursive file lists, relative paths, and sizes.
+    private func validateSnapshot(sourcePath: String, snapshotDocumentsPath: String) -> Bool {
+        // Ensure both directories exist
+        guard FileManager.default.fileExists(atPath: sourcePath), FileManager.default.fileExists(atPath: snapshotDocumentsPath) else {
+            self.log("Snapshot validation failed: One or both directories don't exist", type: .error)
+            return false
+        }
+
+        do {
+            let sourceFiles = try getAllFilesRecursively(at: sourcePath)
+            let snapshotFiles = try getAllFilesRecursively(at: snapshotDocumentsPath)
+
+            if sourceFiles.count != snapshotFiles.count {
+                self.log("Snapshot validation failed: File count mismatch. Source: \(sourceFiles.count), Snapshot: \(snapshotFiles.count)", type: .error)
+                return false
+            }
+
+            for (index, sourceFile) in sourceFiles.enumerated() {
+                let copiedFile = snapshotFiles[index]
+
+                if sourceFile.relativePath != copiedFile.relativePath {
+                    self.log("Snapshot validation failed: File path mismatch at index \(index)", type: .error)
+                    return false
+                }
+
+                if sourceFile.size != copiedFile.size {
+                    self.log("Snapshot validation failed: Size mismatch for \(sourceFile.relativePath). Source: \(sourceFile.size), Snapshot: \(copiedFile.size)", type: .error)
+                    return false
+                }
+            }
+
+            self.log("Snapshot validation successful: All \(sourceFiles.count) files copied correctly")
+            return true
+        } catch {
+            self.log("Snapshot validation failed with error: \(error)", type: .error)
+            return false
         }
     }
     
