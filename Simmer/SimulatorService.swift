@@ -12,6 +12,22 @@ import os.log
 class SimulatorService: ObservableObject {
     private let logger = Logger(subsystem: "com.simmer.app", category: "SimulatorService")
     
+    // MARK: - Mock Data Configuration
+    private var useMockData: Bool {
+        get {
+            return UserDefaults.standard.bool(forKey: "UseMockData")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "UseMockData")
+        }
+    }
+    
+    // Method to enable/disable mock data
+    func enableMockData(_ enabled: Bool) {
+        useMockData = enabled
+        loadSimulators() // Reload with new data
+    }
+    
     private func log(_ message: String, type: OSLogType = .default) {
         // Use NSLog for release builds to ensure visibility in Console.app
         #if DEBUG
@@ -41,9 +57,13 @@ class SimulatorService: ObservableObject {
     }
     
     func loadSimulators() {
-        var simulators = getAvailableSimulators()
-        loadPinnedState(&simulators)
-        self.simulators = sortSimulators(simulators)
+        if useMockData {
+            simulators = getMockSimulators()
+        } else {
+            var simulators = getAvailableSimulators()
+            loadPinnedState(&simulators)
+            self.simulators = sortSimulators(simulators)
+        }
         
         // Debug: Log simulator information
         log("=== Simulator Debug Info ===")
@@ -102,32 +122,41 @@ class SimulatorService: ObservableObject {
     }
     
     func loadApps(for simulator: Simulator) {
-        apps = getApps(for: simulator)
+        if useMockData {
+            apps = getMockApps(for: simulator)
+        } else {
+            apps = getApps(for: simulator)
+        }
         selectedSimulator = simulator
     }
     
     func loadSnapshots(for app: App) {
-        snapshots = getSnapshots(for: app)
-        selectedApp = app
-        
-        // Calculate total snapshots size if there are snapshots
-        if !snapshots.isEmpty {
-            calculateTotalSnapshotsSize()
-        }
-        
-        // Ensure the app is in the apps array and has loading state set
-        if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
-            if !apps[appIndex].isLoadingDocumentsSize && apps[appIndex].documentsSize == 0 && !apps[appIndex].documentsPath.isEmpty {
-                apps[appIndex].startLoadingDocumentsSize()
-                calculateDocumentsSize(for: apps[appIndex]) { calculatedSize in
-                    DispatchQueue.main.async {
-                        if let updatedAppIndex = self.apps.firstIndex(where: { $0.id == app.id }) {
-                            self.apps[updatedAppIndex].finishLoadingDocumentsSize(calculatedSize)
+        if useMockData {
+            snapshots = getMockSnapshots(for: app)
+            totalSnapshotsSize = snapshots.reduce(0) { $0 + $1.size }
+        } else {
+            snapshots = getSnapshots(for: app)
+            
+            // Calculate total snapshots size if there are snapshots
+            if !snapshots.isEmpty {
+                calculateTotalSnapshotsSize()
+            }
+            
+            // Ensure the app is in the apps array and has loading state set
+            if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
+                if !apps[appIndex].isLoadingDocumentsSize && apps[appIndex].documentsSize == 0 && !apps[appIndex].documentsPath.isEmpty {
+                    apps[appIndex].startLoadingDocumentsSize()
+                    calculateDocumentsSize(for: apps[appIndex]) { calculatedSize in
+                        DispatchQueue.main.async {
+                            if let updatedAppIndex = self.apps.firstIndex(where: { $0.id == app.id }) {
+                                self.apps[updatedAppIndex].finishLoadingDocumentsSize(calculatedSize)
+                            }
                         }
                     }
                 }
             }
         }
+        selectedApp = app
     }
     
     private func getAvailableSimulators() -> [Simulator] {
@@ -457,6 +486,24 @@ class SimulatorService: ObservableObject {
         }
         log("No icon found for bundle ID: \(bundleIdentifier)")
         return nil
+    }
+    
+    private func getMockAppIcon(for appName: String) -> String {
+        // Map app names to their asset catalog names
+        switch appName {
+        case "PhotoGram":
+            return "MockAppIcons/photogram"
+        case "BikBok":
+            return "MockAppIcons/bikbok"
+        case "Smudgify":
+            return "MockAppIcons/smudgify"
+        case "FlixStream":
+            return "MockAppIcons/flixstream"
+        case "HiLoThere":
+            return "MockAppIcons/hilothere"
+        default:
+            return ""
+        }
     }
     
     private func getSystemAppIcon(for bundleIdentifier: String) -> String? {
@@ -1151,4 +1198,103 @@ class SimulatorService: ObservableObject {
             loadSnapshots(for: app)
         }
     }
+    
+    // MARK: - Mock Data Methods
+    
+    private func getMockSimulators() -> [Simulator] {
+        return [
+            Simulator(
+                id: "mock-iphone-15-pro",
+                name: "iPhone 15 Pro",
+                iOSVersion: "iOS 17.4",
+                deviceType: .iPhone,
+                udid: "mock-udid-1",
+                dataPath: "/mock/path/1",
+                isPinned: true
+            ),
+            Simulator(
+                id: "mock-iphone-15",
+                name: "iPhone 15",
+                iOSVersion: "iOS 17.4",
+                deviceType: .iPhone,
+                udid: "mock-udid-2",
+                dataPath: "/mock/path/2",
+                isPinned: false
+            ),
+            Simulator(
+                id: "mock-ipad-pro",
+                name: "iPad Pro (12.9-inch)",
+                iOSVersion: "iOS 17.4",
+                deviceType: .iPad,
+                udid: "mock-udid-3",
+                dataPath: "/mock/path/3",
+                isPinned: false
+            ),
+            Simulator(
+                id: "mock-iphone-se",
+                name: "iPhone SE (3rd generation)",
+                iOSVersion: "iOS 17.3",
+                deviceType: .iPhone,
+                udid: "mock-udid-4",
+                dataPath: "/mock/path/4",
+                isPinned: false
+            )
+        ]
+    }
+    
+    private func getMockApps(for simulator: Simulator) -> [App] {
+        let appNames = ["PhotoGram", "BikBok", "Smudgify", "FlixStream", "HiLoThere"]
+        let bundleIds = ["com.photogram.ios", "com.bikbok.app", "com.smudgify.music", "com.flixstream.tv", "com.hilothere.chat"]
+        let documentSizes = [2_500_000_000, 1_800_000_000, 950_000_000, 3_200_000_000, 750_000_000] // in bytes
+        
+        return zip(zip(appNames, bundleIds), documentSizes).enumerated().map { index, data in
+            let ((name, bundleId), size) = data
+            return App(
+                id: "mock-app-\(index + 1)",
+                name: name,
+                bundleIdentifier: bundleId,
+                iconPath: getMockAppIcon(for: name),
+                documentsPath: "/mock/documents/\(name.lowercased().replacingOccurrences(of: " ", with: ""))",
+                snapshotsPath: "/mock/snapshots/\(name.lowercased().replacingOccurrences(of: " ", with: ""))",
+                documentsSize: Int64(size)
+            )
+        }
+    }
+    
+    private func getMockSnapshots(for app: App) -> [Snapshot] {
+        let calendar = Calendar.current
+        let now = Date()
+        
+        return [
+            Snapshot(
+                id: "mock-snapshot-1",
+                name: "Backup before update",
+                date: calendar.date(byAdding: .day, value: -1, to: now) ?? now,
+                size: 850_000_000, // 850 MB
+                path: "/mock/snapshots/backup-1"
+            ),
+            Snapshot(
+                id: "mock-snapshot-2",
+                name: "Weekly backup",
+                date: calendar.date(byAdding: .day, value: -7, to: now) ?? now,
+                size: 1_200_000_000, // 1.2 GB
+                path: "/mock/snapshots/backup-2"
+            ),
+            Snapshot(
+                id: "mock-snapshot-3",
+                name: "Monthly backup",
+                date: calendar.date(byAdding: .month, value: -1, to: now) ?? now,
+                size: 2_100_000_000, // 2.1 GB
+                path: "/mock/snapshots/backup-3"
+            ),
+            Snapshot(
+                id: "mock-snapshot-4",
+                name: "Before app reinstall",
+                date: calendar.date(byAdding: .day, value: -14, to: now) ?? now,
+                size: 950_000_000, // 950 MB
+                path: "/mock/snapshots/backup-4"
+            )
+        ]
+    }
+    
 } 

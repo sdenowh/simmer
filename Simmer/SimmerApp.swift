@@ -37,10 +37,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupPopover()
+        setupKeyboardShortcuts()
         // Show the popover automatically on launch, after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.togglePopover()
         }
+    }
+    
+    private func setupKeyboardShortcuts() {
+        // Add keyboard shortcut to toggle mock data (⌘+M)
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.modifierFlags.contains(.command) && event.characters == "m" {
+                self.toggleMockData()
+                return nil
+            }
+            return event
+        }
+    }
+    
+    private func toggleMockData() {
+        // Toggle mock data state
+        let currentState = UserDefaults.standard.bool(forKey: "UseMockData")
+        let newState = !currentState
+        UserDefaults.standard.set(newState, forKey: "UseMockData")
+        
+        // Enable/disable mock data in the service
+        simulatorService.enableMockData(newState)
+        
+        // Show a notification
+        let notification = NSUserNotification()
+        notification.title = "Simmer"
+        notification.informativeText = newState ? "Mock data enabled (⌘+M to disable)" : "Mock data disabled (⌘+M to enable)"
+        notification.soundName = NSUserNotificationDefaultSoundName
+        NSUserNotificationCenter.default.deliver(notification)
     }
     
     private func setupStatusItem() {
