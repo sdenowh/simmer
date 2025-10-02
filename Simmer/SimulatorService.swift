@@ -788,13 +788,35 @@ class SimulatorService: ObservableObject {
     // MARK: - Updated Functions with Path Validation
     
     func openDocumentsFolder(for app: App) {
-        guard let validatedApp = getValidatedApp(app) else {
-            log("Could not validate paths for \(app.name), cannot open documents folder", type: .error)
+        // Only require a valid Documents path; Snapshots is irrelevant for opening
+        var targetApp = app
+
+        guard !targetApp.documentsPath.isEmpty else {
+            log("Documents path is empty for \(targetApp.name); cannot open", type: .error)
             return
         }
-        
-        log("Opening documents folder for \(validatedApp.name)")
-        NSWorkspace.shared.open(URL(fileURLWithPath: validatedApp.documentsPath))
+
+        let documentsPath = targetApp.documentsPath
+
+        // Ensure the Documents directory exists; create if missing
+        var isDirectory: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: documentsPath, isDirectory: &isDirectory) || !isDirectory.boolValue {
+            do {
+                try FileManager.default.createDirectory(atPath: documentsPath, withIntermediateDirectories: true)
+                log("Created Documents directory for \(targetApp.name) at \(documentsPath)")
+            } catch {
+                log("Failed to create Documents directory at \(documentsPath): \(error)", type: .error)
+                return
+            }
+        }
+
+        let url = URL(fileURLWithPath: documentsPath, isDirectory: true)
+        log("Revealing documents folder for \(targetApp.name) at \(documentsPath)")
+        if #available(macOS 10.15, *) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
     
     func takeSnapshot(for app: App) {
