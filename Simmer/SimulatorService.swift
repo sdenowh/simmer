@@ -784,44 +784,82 @@ class SimulatorService: ObservableObject {
         
         return nil
     }
+
+    // Returns an app whose Documents path exists, refreshing simulator data if needed.
+    // Does not require the Snapshots directory to exist.
+    private func getAppWithValidDocuments(_ app: App) -> App? {
+        // If documents exists, we're good
+        if FileManager.default.fileExists(atPath: app.documentsPath) {
+            return app
+        }
+        // Try to refresh and get updated app
+        if refreshSimulatorDataIfNeeded(for: app) {
+            if let updatedApp = apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+                if FileManager.default.fileExists(atPath: updatedApp.documentsPath) {
+                    return updatedApp
+                }
+            }
+        }
+        return nil
+    }
     
     // MARK: - Updated Functions with Path Validation
     
     func openDocumentsFolder(for app: App) {
         // Only require a valid Documents path; Snapshots is irrelevant for opening
-        var targetApp = app
-
-        guard !targetApp.documentsPath.isEmpty else {
-            log("Documents path is empty for \(targetApp.name); cannot open", type: .error)
+        guard !app.documentsPath.isEmpty else {
+            log("Documents path is empty for \(app.name); cannot open", type: .error)
             return
         }
 
-        let documentsPath = targetApp.documentsPath
+        let documentsPath = app.documentsPath
 
         // Ensure the Documents directory exists; create if missing
         var isDirectory: ObjCBool = false
         if !FileManager.default.fileExists(atPath: documentsPath, isDirectory: &isDirectory) || !isDirectory.boolValue {
             do {
                 try FileManager.default.createDirectory(atPath: documentsPath, withIntermediateDirectories: true)
-                log("Created Documents directory for \(targetApp.name) at \(documentsPath)")
+                log("Created Documents directory for \(app.name) at \(documentsPath)")
             } catch {
                 log("Failed to create Documents directory at \(documentsPath): \(error)", type: .error)
                 return
             }
         }
 
-        let url = URL(fileURLWithPath: documentsPath, isDirectory: true)
-        log("Revealing documents folder for \(targetApp.name) at \(documentsPath)")
-        if #available(macOS 10.15, *) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        } else {
-            NSWorkspace.shared.open(url)
+        // Try to select the first visible file in Documents; fallback to opening the folder
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(atPath: documentsPath)
+                .filter { !$0.hasPrefix(".") } // skip hidden
+                .sorted()
+
+            var selectedFileURL: URL?
+            for item in contents {
+                let fullPath = "\(documentsPath)/\(item)"
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir), !isDir.boolValue {
+                    selectedFileURL = URL(fileURLWithPath: fullPath, isDirectory: false)
+                    break
+                }
+            }
+
+            if let fileURL = selectedFileURL {
+                log("Revealing first file in Documents for \(app.name): \(fileURL.path)")
+                NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                return
+            }
+        } catch {
+            log("Failed to enumerate Documents at \(documentsPath): \(error)", type: .error)
         }
+
+        let url = URL(fileURLWithPath: documentsPath, isDirectory: true)
+        log("Opening documents folder for \(app.name) at \(documentsPath)")
+        NSWorkspace.shared.open(url)
     }
     
     func takeSnapshot(for app: App) {
-        guard let validatedApp = getValidatedApp(app) else {
-            log("Could not validate paths for \(app.name), cannot take snapshot", type: .error)
+        // Only require a valid Documents directory. Snapshots directory will be created if needed.
+        guard let validatedApp = getAppWithValidDocuments(app) else {
+            log("Documents path invalid for \(app.name), cannot take snapshot", type: .error)
             return
         }
         
