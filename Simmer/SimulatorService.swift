@@ -138,7 +138,7 @@ class SimulatorService: ObservableObject {
         return nil
     }
 
-    func sendPushNotification(payloadJSON: String, name: String?, for app: App, on simulator: Simulator, completion: ((Bool, String?) -> Void)? = nil) {
+    func sendPushNotification(payloadJSON: String, name: String?, for app: App, on simulator: Simulator, saveToHistory: Bool = true, completion: ((Bool, String?) -> Void)? = nil) {
         // Validate JSON
         guard let data = payloadJSON.data(using: .utf8) else {
             completion?(false, "Invalid UTF-8 payload")
@@ -197,13 +197,15 @@ class SimulatorService: ObservableObject {
             DispatchQueue.main.async {
                 if success {
                     self.log("Push sent successfully: \(output)")
-                    // Persist history
-                    var existing = self.getPushHistory(for: app, on: simulator)
-                    let fallbackName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let finalName = (fallbackName?.isEmpty == false ? fallbackName! : (self.extractAlertTitle(from: payloadJSON) ?? ""))
-                    let item = SentNotification(id: UUID().uuidString, name: finalName, createdAt: Date(), payloadJSON: payloadJSON)
-                    existing.append(item)
-                    self.savePushHistory(existing, for: app, on: simulator)
+                    // Persist history unless disabled
+                    if saveToHistory {
+                        var existing = self.getPushHistory(for: app, on: simulator)
+                        let fallbackName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let finalName = (fallbackName?.isEmpty == false ? fallbackName! : (self.extractAlertTitle(from: payloadJSON) ?? ""))
+                        let item = SentNotification(id: UUID().uuidString, name: finalName, createdAt: Date(), payloadJSON: payloadJSON)
+                        existing.append(item)
+                        self.savePushHistory(existing, for: app, on: simulator)
+                    }
 
                     // User notification
                     let n = NSUserNotification()
@@ -229,7 +231,7 @@ class SimulatorService: ObservableObject {
             completion?(false, "No previous notification to repeat")
             return
         }
-        sendPushNotification(payloadJSON: last.payloadJSON, name: last.name.isEmpty ? nil : last.name, for: app, on: simulator, completion: completion)
+        sendPushNotification(payloadJSON: last.payloadJSON, name: last.name.isEmpty ? nil : last.name, for: app, on: simulator, saveToHistory: false, completion: completion)
     }
     
     func togglePin(for simulator: Simulator) {
