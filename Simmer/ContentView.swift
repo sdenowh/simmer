@@ -296,93 +296,6 @@ struct AppActionsView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Push Notifications
-            VStack(spacing: 0) {
-                Button(action: {
-                    prepareDefaultPushPayload()
-                    isShowingPushSheet = true
-                }) {
-                    HStack {
-                        Image(systemName: "bell")
-                            .foregroundColor(.yellow)
-                            .frame(width: 20)
-                        Text("Send Push Notification")
-                            .font(.system(size: 12))
-                            .foregroundColor(.primary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .padding(.leading, 40)
-                }
-                .buttonStyle(PlainButtonStyle())
-
-                HStack {
-                    Button(action: {
-                        if let sim = simulatorService.selectedSimulator {
-                            simulatorService.repeatLastPush(for: app, on: sim) { success, error in
-                                if !success {
-                                    lastSendError = error ?? "Unknown error"
-                                }
-                            }
-                        }
-                    }) {
-                        HStack {
-                            Image(systemName: "arrow.uturn.right")
-                                .foregroundColor(.orange)
-                                .frame(width: 20)
-                            Text("Repeat Last Notification")
-                                .font(.system(size: 12))
-                                .foregroundColor(.primary)
-                            Spacer()
-                        }
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .padding(.leading, 40)
-
-                    Menu {
-                        if let sim = simulatorService.selectedSimulator {
-                            let history = simulatorService.getPushHistory(for: app, on: sim)
-                            if history.isEmpty {
-                                Text("No Saved Notifications").disabled(true)
-                            } else {
-                                ForEach(history, id: \.id) { item in
-                                    Button(action: {
-                                        pushPayloadText = item.payloadJSON
-                                        pushDescriptionText = item.name
-                                        isShowingPushSheet = true
-                                    }) {
-                                        HStack {
-                                            Text(displayName(for: item))
-                                            Spacer()
-                                            Text(item.createdAt, style: .date)
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 12))
-                            .frame(width: 24, height: 24)
-                    }
-                    .menuIndicator(.hidden)
-                    .buttonStyle(PlainButtonStyle())
-                    .padding(.trailing, 8)
-                }
-                if !lastSendError.isEmpty {
-                    Text(lastSendError)
-                        .font(.system(size: 10))
-                        .foregroundColor(.red)
-                        .padding(.leading, 64)
-                        .padding(.bottom, 4)
-                }
-            }
-
             // Show Documents Folder
             Button(action: {
                 simulatorService.openDocumentsFolder(for: app)
@@ -436,6 +349,93 @@ struct AppActionsView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 
+                // Push Notifications (moved after Take Documents Snapshot)
+                VStack(spacing: 0) {
+                    Button(action: {
+                        prepareDefaultPushPayload()
+                        isShowingPushSheet = true
+                    }) {
+                        HStack {
+                            Image(systemName: "bell")
+                                .foregroundColor(.yellow)
+                                .frame(width: 20)
+                            Text("Send Push Notification")
+                                .font(.system(size: 12))
+                                .foregroundColor(.primary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .padding(.leading, 40)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+
+                    HStack {
+                        Button(action: {
+                            if let sim = simulatorService.selectedSimulator {
+                                simulatorService.repeatLastPush(for: app, on: sim) { success, error in
+                                    if !success {
+                                        lastSendError = error ?? "Unknown error"
+                                    }
+                                }
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "arrow.uturn.right")
+                                    .foregroundColor(.orange)
+                                    .frame(width: 20)
+                                Text("Repeat Last Notification")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.primary)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .padding(.leading, 40)
+
+                        Menu {
+                            if let sim = simulatorService.selectedSimulator {
+                                let history = simulatorService.getPushHistory(for: app, on: sim)
+                                if history.isEmpty {
+                                    Text("No Saved Notifications").disabled(true)
+                                } else {
+                                    ForEach(history, id: \.id) { item in
+                                        Button(action: {
+                                            pushPayloadText = item.payloadJSON
+                                            pushDescriptionText = item.name
+                                            isShowingPushSheet = true
+                                        }) {
+                                            HStack {
+                                                Text(displayName(for: item))
+                                                Spacer()
+                                                Text(item.createdAt, style: .date)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "line.3.horizontal.decrease.circle")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 12))
+                                .frame(width: 24, height: 24)
+                        }
+                        .menuIndicator(.hidden)
+                        .buttonStyle(PlainButtonStyle())
+                        .padding(.trailing, 8)
+                    }
+                    if !lastSendError.isEmpty {
+                        Text(lastSendError)
+                            .font(.system(size: 10))
+                            .foregroundColor(.red)
+                            .padding(.leading, 64)
+                            .padding(.bottom, 4)
+                    }
+                }
+
                 // Existing snapshots
                 ForEach(simulatorService.snapshots) { snapshot in
                     SnapshotRowView(
@@ -669,11 +669,7 @@ struct PushComposeSheet: View {
                 .background(Color.black.opacity(0.1))
                 .cornerRadius(4)
 
-            TextEditor(text: $payloadText)
-                .font(.system(size: 11, design: .monospaced))
-                .padding(6)
-                .background(Color.black.opacity(0.1))
-                .cornerRadius(4)
+            MonospaceTextView(text: $payloadText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack {
@@ -695,3 +691,64 @@ struct PushComposeSheet: View {
         .padding(12)
     }
 }
+
+#if os(macOS)
+// A native NSTextView wrapped for SwiftUI to provide robust selection,
+// copy/cut/paste, and monospaced rendering in the popover sheet.
+struct MonospaceTextView: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let contentSize = scrollView.contentSize
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height))
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.allowsUndo = true
+        textView.usesFindBar = true
+        textView.isHorizontallyResizable = true
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.delegate = context.coordinator
+        textView.string = text
+
+        scrollView.documentView = textView
+        scrollView.backgroundColor = NSColor.black.withAlphaComponent(0.06)
+        scrollView.wantsLayer = true
+        scrollView.layer?.cornerRadius = 4
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        if let textView = nsView.documentView as? NSTextView, textView.string != text {
+            textView.string = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MonospaceTextView
+        init(_ parent: MonospaceTextView) { self.parent = parent }
+        func textDidChange(_ notification: Notification) {
+            if let tv = notification.object as? NSTextView {
+                parent.text = tv.string
+            }
+        }
+    }
+}
+#endif

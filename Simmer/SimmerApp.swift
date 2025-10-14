@@ -38,6 +38,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         setupStatusItem()
         setupPopover()
         setupKeyboardShortcuts()
+        setupEditMenu()
         // Show the popover automatically on launch, after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.togglePopover()
@@ -53,6 +54,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
             return event
         }
+    }
+    
+    private func setupEditMenu() {
+        let mainMenu = NSMenu()
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        NSApp.mainMenu = mainMenu
+        
+        // App menu (about/quit minimal)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Simmer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        
+        // Edit menu with standard selectors so cmd-x/c/v/z work
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
     }
     
     private func toggleMockData() {
