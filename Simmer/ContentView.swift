@@ -272,6 +272,10 @@ struct AppRowView: View {
 struct AppActionsView: View {
     let app: App
     @ObservedObject var simulatorService: SimulatorService
+    @State private var isShowingPushSheet: Bool = false
+    @State private var pushPayloadText: String = ""
+    @State private var pushDescriptionText: String = ""
+    @State private var lastSendError: String = ""
     
     private var currentApp: App? {
         simulatorService.apps.first { $0.id == app.id }
@@ -292,6 +296,93 @@ struct AppActionsView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            // Push Notifications
+            VStack(spacing: 0) {
+                Button(action: {
+                    prepareDefaultPushPayload()
+                    isShowingPushSheet = true
+                }) {
+                    HStack {
+                        Image(systemName: "bell")
+                            .foregroundColor(.yellow)
+                            .frame(width: 20)
+                        Text("Send Push Notification")
+                            .font(.system(size: 12))
+                            .foregroundColor(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .padding(.leading, 40)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                HStack {
+                    Button(action: {
+                        if let sim = simulatorService.selectedSimulator {
+                            simulatorService.repeatLastPush(for: app, on: sim) { success, error in
+                                if !success {
+                                    lastSendError = error ?? "Unknown error"
+                                }
+                            }
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "arrow.uturn.right")
+                                .foregroundColor(.orange)
+                                .frame(width: 20)
+                            Text("Repeat Last Notification")
+                                .font(.system(size: 12))
+                                .foregroundColor(.primary)
+                            Spacer()
+                        }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .padding(.leading, 40)
+
+                    Menu {
+                        if let sim = simulatorService.selectedSimulator {
+                            let history = simulatorService.getPushHistory(for: app, on: sim)
+                            if history.isEmpty {
+                                Text("No Saved Notifications").disabled(true)
+                            } else {
+                                ForEach(history, id: \.id) { item in
+                                    Button(action: {
+                                        pushPayloadText = item.payloadJSON
+                                        pushDescriptionText = item.name
+                                        isShowingPushSheet = true
+                                    }) {
+                                        HStack {
+                                            Text(displayName(for: item))
+                                            Spacer()
+                                            Text(item.createdAt, style: .date)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 12))
+                            .frame(width: 24, height: 24)
+                    }
+                    .menuIndicator(.hidden)
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.trailing, 8)
+                }
+                if !lastSendError.isEmpty {
+                    Text(lastSendError)
+                        .font(.system(size: 10))
+                        .foregroundColor(.red)
+                        .padding(.leading, 64)
+                        .padding(.bottom, 4)
+                }
+            }
+
             // Show Documents Folder
             Button(action: {
                 simulatorService.openDocumentsFolder(for: app)
@@ -388,6 +479,42 @@ struct AppActionsView: View {
                 }
             }
         }
+        .sheet(isPresented: $isShowingPushSheet) {
+            PushComposeSheet(
+                app: app,
+                simulator: simulatorService.selectedSimulator,
+                payloadText: $pushPayloadText,
+                descriptionText: $pushDescriptionText,
+                onCancel: {
+                    isShowingPushSheet = false
+                },
+                onSend: {
+                    guard let sim = simulatorService.selectedSimulator else { return }
+                    lastSendError = ""
+                    simulatorService.sendPushNotification(payloadJSON: pushPayloadText, name: pushDescriptionText.isEmpty ? nil : pushDescriptionText, for: app, on: sim) { success, error in
+                        if success {
+                            isShowingPushSheet = false
+                        } else {
+                            lastSendError = error ?? "Unknown error"
+                        }
+                    }
+                }
+            )
+            .frame(width: 520, height: 360)
+        }
+    }
+
+    private func prepareDefaultPushPayload() {
+        if pushPayloadText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pushPayloadText = """
+            {\n  \"aps\": {\n    \"alert\": {\n      \"title\": \"Test Notification\",\n      \"body\": \"Hello from Simmer\"\n    },\n    \"sound\": \"default\"\n  }\n}
+            """
+        }
+    }
+
+    private func displayName(for item: SentNotification) -> String {
+        let trimmed = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "(untitled)" : trimmed
     }
 }
 
@@ -508,4 +635,63 @@ struct VisualEffectView: NSViewRepresentable {
 
 #Preview {
     ContentView(appState: AppState(), simulatorService: SimulatorService())
+}
+
+// MARK: - Push Compose Sheet
+
+struct PushComposeSheet: View {
+    let app: App
+    let simulator: Simulator?
+    @Binding var payloadText: String
+    @Binding var descriptionText: String
+    let onCancel: () -> Void
+    let onSend: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "bell")
+                    .foregroundColor(.yellow)
+                Text("Compose Push Notification")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+                if let sim = simulator {
+                    Text("\(app.name) · \(sim.name)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.bottom, 4)
+
+            TextField("Description (optional)", text: $descriptionText)
+                .textFieldStyle(PlainTextFieldStyle())
+                .padding(6)
+                .background(Color.black.opacity(0.1))
+                .cornerRadius(4)
+
+            TextEditor(text: $payloadText)
+                .font(.system(size: 11, design: .monospaced))
+                .padding(6)
+                .background(Color.black.opacity(0.1))
+                .cornerRadius(4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { onCancel() }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                Button("Send") { onSend() }
+                    .buttonStyle(PlainButtonStyle())
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.blue.opacity(0.8))
+                    .foregroundColor(.white)
+                    .cornerRadius(6)
+            }
+            .padding(.top, 4)
+        }
+        .padding(12)
+    }
 }

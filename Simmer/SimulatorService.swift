@@ -47,6 +47,7 @@ class SimulatorService: ObservableObject {
     @Published var isSnapshotOperationInProgress: Bool = false
     @Published var snapshotOperationProgress: Double = 0.0
     @Published var snapshotOperationMessage: String = ""
+    @Published var pushHistoryChangeTick: Int = 0
     
     private let simulatorPath = "~/Library/Developer/CoreSimulator/Devices"
     private let expandedSimulatorPath = NSString(string: "~/Library/Developer/CoreSimulator/Devices").expandingTildeInPath
@@ -86,6 +87,149 @@ class SimulatorService: ObservableObject {
             }
             log("---")
         }
+    }
+
+    // MARK: - Push Notifications
+
+    private func pushHistoryKey(udid: String, bundleId: String) -> String {
+        return "PushHistory-\(udid)-\(bundleId)"
+    }
+
+    func getPushHistory(for app: App, on simulator: Simulator) -> [SentNotification] {
+        let key = pushHistoryKey(udid: simulator.udid, bundleId: app.bundleIdentifier)
+        if let data = UserDefaults.standard.data(forKey: key) {
+            do {
+                let items = try JSONDecoder().decode([SentNotification].self, from: data)
+                return items.sorted { $0.createdAt > $1.createdAt }
+            } catch {
+                log("Failed to decode push history: \(error)", type: .error)
+                return []
+            }
+        }
+        return []
+    }
+
+    private func savePushHistory(_ items: [SentNotification], for app: App, on simulator: Simulator) {
+        let key = pushHistoryKey(udid: simulator.udid, bundleId: app.bundleIdentifier)
+        do {
+            let data = try JSONEncoder().encode(items)
+            UserDefaults.standard.set(data, forKey: key)
+            DispatchQueue.main.async {
+                self.pushHistoryChangeTick &+= 1
+                self.objectWillChange.send()
+            }
+        } catch {
+            log("Failed to encode push history: \(error)", type: .error)
+        }
+    }
+
+    private func extractAlertTitle(from jsonString: String) -> String? {
+        guard let data = jsonString.data(using: .utf8) else { return nil }
+        do {
+            let obj = try JSONSerialization.jsonObject(with: data, options: [])
+            if let dict = obj as? [String: Any],
+               let aps = dict["aps"] as? [String: Any] {
+                if let alert = aps["alert"] as? [String: Any], let title = alert["title"] as? String { return title }
+                if let title = aps["alert"] as? String { return title }
+            }
+        } catch {
+            return nil
+        }
+        return nil
+    }
+
+    func sendPushNotification(payloadJSON: String, name: String?, for app: App, on simulator: Simulator, completion: ((Bool, String?) -> Void)? = nil) {
+        // Validate JSON
+        guard let data = payloadJSON.data(using: .utf8) else {
+            completion?(false, "Invalid UTF-8 payload")
+            return
+        }
+        do {
+            _ = try JSONSerialization.jsonObject(with: data, options: [])
+        } catch {
+            completion?(false, "Payload is not valid JSON: \(error.localizedDescription)")
+            return
+        }
+
+        // Write to temp .apns file
+        let tempDir = NSTemporaryDirectory()
+        let filePath = (tempDir as NSString).appendingPathComponent("simmer-\(UUID().uuidString).apns")
+        do {
+            try payloadJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
+        } catch {
+            completion?(false, "Failed to write temp file: \(error.localizedDescription)")
+            return
+        }
+
+        // Run simctl push
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.launchPath = "/usr/bin/xcrun"
+            process.arguments = ["simctl", "push", simulator.udid, app.bundleIdentifier, filePath]
+
+            let pipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = errPipe
+
+            do {
+                try process.run()
+            } catch {
+                DispatchQueue.main.async {
+                    self.log("Failed to run simctl push: \(error)", type: .error)
+                    completion?(false, "Failed to run simctl push: \(error.localizedDescription)")
+                }
+                try? FileManager.default.removeItem(atPath: filePath)
+                return
+            }
+
+            process.waitUntilExit()
+
+            let success = process.terminationStatus == 0
+            let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: outputData, encoding: .utf8) ?? ""
+            let errOutput = String(data: errData, encoding: .utf8) ?? ""
+
+            // Clean up temp
+            try? FileManager.default.removeItem(atPath: filePath)
+
+            DispatchQueue.main.async {
+                if success {
+                    self.log("Push sent successfully: \(output)")
+                    // Persist history
+                    var existing = self.getPushHistory(for: app, on: simulator)
+                    let fallbackName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let finalName = (fallbackName?.isEmpty == false ? fallbackName! : (self.extractAlertTitle(from: payloadJSON) ?? ""))
+                    let item = SentNotification(id: UUID().uuidString, name: finalName, createdAt: Date(), payloadJSON: payloadJSON)
+                    existing.append(item)
+                    self.savePushHistory(existing, for: app, on: simulator)
+
+                    // User notification
+                    let n = NSUserNotification()
+                    n.title = "Simmer"
+                    n.informativeText = "Push sent to \(app.name) on \(simulator.name)"
+                    NSUserNotificationCenter.default.deliver(n)
+                    completion?(true, nil)
+                } else {
+                    self.log("Push failed: \(errOutput)", type: .error)
+                    let n = NSUserNotification()
+                    n.title = "Simmer"
+                    n.informativeText = "Push failed: \(errOutput)"
+                    NSUserNotificationCenter.default.deliver(n)
+                    completion?(false, errOutput.isEmpty ? output : errOutput)
+                }
+            }
+        }
+    }
+
+    func repeatLastPush(for app: App, on simulator: Simulator, completion: ((Bool, String?) -> Void)? = nil) {
+        let history = getPushHistory(for: app, on: simulator)
+        guard let last = history.first else {
+            completion?(false, "No previous notification to repeat")
+            return
+        }
+        sendPushNotification(payloadJSON: last.payloadJSON, name: last.name.isEmpty ? nil : last.name, for: app, on: simulator, completion: completion)
     }
     
     func togglePin(for simulator: Simulator) {

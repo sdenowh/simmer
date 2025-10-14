@@ -101,3 +101,12 @@ struct DirectorySize {
         return formatter.string(fromByteCount: bytes)
     }
 } 
+
+// Represents a push notification payload previously sent to a specific
+// simulator/app combination. Stored in UserDefaults per (udid,bundleId).
+struct SentNotification: Identifiable, Hashable, Codable {
+    let id: String
+    let name: String
+    let createdAt: Date
+    let payloadJSON: String
+}
