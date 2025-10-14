@@ -483,6 +483,7 @@ struct AppActionsView: View {
             PushComposeSheet(
                 app: app,
                 simulator: simulatorService.selectedSimulator,
+                history: (simulatorService.selectedSimulator != nil) ? simulatorService.getPushHistory(for: app, on: simulatorService.selectedSimulator!) : [],
                 payloadText: $pushPayloadText,
                 descriptionText: $pushDescriptionText,
                 onCancel: {
@@ -642,6 +643,7 @@ struct VisualEffectView: NSViewRepresentable {
 struct PushComposeSheet: View {
     let app: App
     let simulator: Simulator?
+    let history: [SentNotification]
     @Binding var payloadText: String
     @Binding var descriptionText: String
     let onCancel: () -> Void
@@ -662,6 +664,43 @@ struct PushComposeSheet: View {
                 }
             }
             .padding(.bottom, 4)
+
+            // History dropdown to load previous notifications
+            HStack(spacing: 8) {
+                Menu {
+                    if history.isEmpty {
+                        Text("No Saved Notifications").disabled(true)
+                    } else {
+                        ForEach(history, id: \.id) { item in
+                            Button(action: {
+                                descriptionText = item.name
+                                payloadText = item.payloadJSON
+                            }) {
+                                HStack {
+                                    Text(displayName(for: item))
+                                    Spacer(minLength: 8)
+                                    Text(item.createdAt, style: .date)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                        Text("Load Previous")
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.08))
+                    .cornerRadius(6)
+                }
+                .menuIndicator(.hidden)
+                Spacer()
+            }
 
             TextField("Description (optional)", text: $descriptionText)
                 .textFieldStyle(PlainTextFieldStyle())
@@ -689,6 +728,11 @@ struct PushComposeSheet: View {
             .padding(.top, 4)
         }
         .padding(12)
+    }
+
+    private func displayName(for item: SentNotification) -> String {
+        let trimmed = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "(untitled)" : trimmed
     }
 }
 
