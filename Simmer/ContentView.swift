@@ -349,7 +349,49 @@ struct AppActionsView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 
-                // Push Notifications (moved after Take Documents Snapshot)
+                // Existing snapshots
+                ForEach(simulatorService.snapshots) { snapshot in
+                    SnapshotRowView(
+                        snapshot: snapshot,
+                        app: app,
+                        simulatorService: simulatorService
+                    )
+                }
+                
+                // Delete All Snapshots
+                if !simulatorService.snapshots.isEmpty {
+                    Button(action: {
+                        simulatorService.deleteAllSnapshots()
+                    }) {
+                        HStack {
+                            Image(systemName: "trash")
+                                .foregroundColor(.red)
+                                .frame(width: 20)
+                            
+                            Text("Delete All Snapshots")
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                            
+                            Spacer()
+                            
+                            if simulatorService.isLoadingTotalSnapshotsSize {
+                                ProgressView()
+                                    .scaleEffect(0.4)
+                                    .frame(width: 8, height: 8)
+                            } else {
+                                Text(simulatorService.getAllSnapshotsSize().formattedSize)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .padding(.leading, 40)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                
+                // Push Notifications
                 VStack(spacing: 0) {
                     Button(action: {
                         prepareDefaultPushPayload()
@@ -434,48 +476,6 @@ struct AppActionsView: View {
                             .padding(.leading, 64)
                             .padding(.bottom, 4)
                     }
-                }
-
-                // Existing snapshots
-                ForEach(simulatorService.snapshots) { snapshot in
-                    SnapshotRowView(
-                        snapshot: snapshot,
-                        app: app,
-                        simulatorService: simulatorService
-                    )
-                }
-                
-                // Delete All Snapshots
-                if !simulatorService.snapshots.isEmpty {
-                    Button(action: {
-                        simulatorService.deleteAllSnapshots()
-                    }) {
-                        HStack {
-                            Image(systemName: "trash")
-                                .foregroundColor(.red)
-                                .frame(width: 20)
-                            
-                            Text("Delete All Snapshots")
-                                .font(.system(size: 12))
-                                .foregroundColor(.red)
-                            
-                            Spacer()
-                            
-                            if simulatorService.isLoadingTotalSnapshotsSize {
-                                ProgressView()
-                                    .scaleEffect(0.4)
-                                    .frame(width: 8, height: 8)
-                            } else {
-                                Text(simulatorService.getAllSnapshotsSize().formattedSize)
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .padding(.leading, 40)
-                    }
-                    .buttonStyle(PlainButtonStyle())
                 }
             }
         }
