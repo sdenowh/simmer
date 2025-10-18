@@ -157,7 +157,7 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.3), value: simulatorService.isSnapshotOperationInProgress)
             }
             }
-            .frame(width: 300, height: 400)
+            .frame(width: 320, height: 450)
         }
     }
 }
