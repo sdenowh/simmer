@@ -29,15 +29,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xcode-
 
-      - name: Build for Release
+      # ---------- UNSIGNED BUILDS FOR PRs / non-tag pushes ----------
+      - name: Build (unsigned for PRs)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
           xcodebuild -project Simmer.xcodeproj \
             -scheme Simmer \
             -configuration Release \
             -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Create app bundle
+      - name: Create app bundle (unsigned)
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
           mkdir -p Simmer.app/Contents/MacOS
           mkdir -p Simmer.app/Contents/Resources
@@ -45,18 +49,103 @@ jobs:
           cp Simmer/Info.plist Simmer.app/Contents/
           cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
           chmod +x Simmer.app/Contents/MacOS/Simmer
+          # Make an unsigned DMG for inspection
+          mkdir -p dmg_temp
+          cp -r Simmer.app dmg_temp/
+          hdiutil create -volname "Simmer" -srcfolder dmg_temp -ov -format UDZO Simmer-unsigned.dmg
+          rm -rf dmg_temp
 
-      - name: Create DMG
+      - name: Upload unsigned artifacts
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: simmer-unsigned
+          path: |
+            Simmer.app
+            Simmer-unsigned.dmg
+
+      # ---------- SIGNED + NOTARIZED RELEASE BUILDS (tags v*) ----------
+      - name: Import Developer ID signing cert
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.DEV_ID_CERT_P12 }}
+          p12-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
+
+      - name: Build (code signing allowed)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Use manual identity to avoid Xcode trying to fetch dev profiles
+          xcodebuild -project Simmer.xcodeproj \
+            -scheme Simmer \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM=${{ secrets.TEAM_ID }} \
+            build
+
+      - name: Create app bundle (to sign)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          rm -rf Simmer.app
+          mkdir -p Simmer.app/Contents/MacOS
+          mkdir -p Simmer.app/Contents/Resources
+          cp build/Build/Products/Release/Simmer Simmer.app/Contents/MacOS/
+          cp Simmer/Info.plist Simmer.app/Contents/
+          cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
+          chmod +x Simmer.app/Contents/MacOS/Simmer
+
+      - name: Codesign app (Developer ID Application)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          # Adjust identity string to match your cert's Common Name
+          IDENTITY="Developer ID Application: YOUR COMPANY NAME (${TEAM_ID})"
+          # If you have entitlements (recommended for Hardened Runtime), reference them:
+          # ENT="Simmer/Simmer.entitlements"
+          # Add --entitlements "$ENT" if present.
+          codesign --deep --force --options runtime --timestamp \
+            --sign "$IDENTITY" \
+            "Simmer.app"
+
+          codesign --verify --deep --strict --verbose=2 "Simmer.app"
+
+      - name: Create signed DMG
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p dmg_temp
           cp -r Simmer.app dmg_temp/
           hdiutil create -volname "Simmer" -srcfolder dmg_temp -ov -format UDZO Simmer.dmg
           rm -rf dmg_temp
 
-      - name: Upload artifacts
+      - name: Notarize DMG with notarytool
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          # Write API key to file with restricted perms
+          echo "$APPLE_API_KEY_P8" > ./AuthKey.p8
+          chmod 600 ./AuthKey.p8
+
+          xcrun notarytool submit "Simmer.dmg" \
+            --key ./AuthKey.p8 \
+            --key-id "$APPLE_KEY_ID" \
+            --issuer "$APPLE_ISSUER_ID" \
+            --wait
+
+      - name: Staple notarization
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          xcrun stapler staple "Simmer.dmg"
+
+      - name: Upload signed artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: simmer-app
+          name: simmer-signed
           path: |
             Simmer.app
-            Simmer.dmg 
+            Simmer.dmg
