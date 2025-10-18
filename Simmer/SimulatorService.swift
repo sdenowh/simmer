@@ -1372,34 +1372,96 @@ class SimulatorService: ObservableObject {
         return files.sorted { $0.relativePath < $1.relativePath }
     }
     
+    // MARK: - Path Safety
+    
+    // Normalizes a filesystem path for safe comparison by resolving symlinks and standardizing.
+    private func normalizedPath(_ path: String) -> String {
+        return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+    
+    // Returns true if candidate is the same as or a subpath of base (directory semantics)
+    private func isPath(_ candidate: String, underDirectory base: String) -> Bool {
+        let candidateNorm = normalizedPath(candidate)
+        let baseNorm = normalizedPath(base)
+        if candidateNorm == baseNorm { return true }
+        let prefix = baseNorm.hasSuffix("/") ? baseNorm : baseNorm + "/"
+        return candidateNorm.hasPrefix(prefix)
+    }
+    
+    // Ensures a snapshot folder lives under the app's Snapshots directory and is not Documents
+    private func isSafeSnapshotPath(_ snapshotPath: String, for app: App) -> Bool {
+        guard !app.snapshotsPath.isEmpty, !app.documentsPath.isEmpty else { return false }
+        // Must be under Snapshots
+        guard isPath(snapshotPath, underDirectory: app.snapshotsPath) else { return false }
+        // Must NOT be equal to Documents or under Documents
+        if isPath(snapshotPath, underDirectory: app.documentsPath) { return false }
+        // Must contain the expected Documents subdir inside the snapshot folder
+        let documentsInsideSnapshot = normalizedPath(snapshotPath + "/Documents")
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: documentsInsideSnapshot, isDirectory: &isDir) {
+            return isDir.boolValue
+        }
+        // Allow deletion even if Documents is missing, but only if the snapshot folder itself is a direct child of Snapshots
+        // i.e., Snapshots/<snapshotName>
+        let parent = normalizedPath((snapshotPath as NSString).deletingLastPathComponent)
+        return parent == normalizedPath(app.snapshotsPath)
+    }
+    
     func deleteSnapshot(_ snapshot: Snapshot) {
-        // For delete operations, we need to validate the snapshot path
-        guard FileManager.default.fileExists(atPath: snapshot.path) else {
-            log("Snapshot path does not exist: \(snapshot.path)", type: .error)
-            
-            // Try to refresh and find the updated snapshot
-            if let selectedApp = selectedApp {
-                loadSnapshots(for: selectedApp)
-                
-                // Try to find the snapshot again
-                if let updatedSnapshot = snapshots.first(where: { $0.id == snapshot.id }) {
-                    if FileManager.default.fileExists(atPath: updatedSnapshot.path) {
-                        log("Found updated snapshot, retrying delete")
-                        deleteSnapshot(updatedSnapshot)
-                        return
-                    }
-                }
-            }
-            
-            log("Could not find valid snapshot to delete", type: .error)
+        // Ensure we have a selected app context
+        guard let app = selectedApp else {
+            log("No selected app; refusing to delete snapshot", type: .error)
             return
         }
         
+        // Resolve latest path for this snapshot by ID to avoid stale paths
+        loadSnapshots(for: app)
+        guard let current = snapshots.first(where: { $0.id == snapshot.id }) else {
+            log("Snapshot not found by id: \(snapshot.id)", type: .error)
+            return
+        }
+        
+        let targetPath = current.path
+        
+        // Existence check
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: targetPath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            log("Snapshot path missing or not a directory: \(targetPath)", type: .error)
+            return
+        }
+        
+        // Dual safety checks: semantic and structural
+        guard isSafeSnapshotPath(targetPath, for: app) else {
+            log("Refusing to delete unsafe path: \(targetPath)", type: .error)
+            return
+        }
+        
+        // Extra sanity check with independent logic: ensure not simulator root or app Documents
+        let normTarget = normalizedPath(targetPath)
+        let normDocs = normalizedPath(app.documentsPath)
+        let normSnapshots = normalizedPath(app.snapshotsPath)
+        if normTarget == normDocs || normTarget == normSnapshots || isPath(normTarget, underDirectory: normDocs) {
+            log("Sanity check failed; target is Documents or Snapshots root: \(normTarget)", type: .error)
+            return
+        }
+        if let sim = selectedSimulator {
+            let normSim = normalizedPath(sim.dataPath)
+            if normTarget == normSim {
+                log("Sanity check failed; target is simulator root: \(normTarget)", type: .error)
+                return
+            }
+            // Also insist target lives under the simulator data path
+            if !isPath(normTarget, underDirectory: normSim) {
+                log("Sanity check failed; target not under simulator path: \(normTarget)", type: .error)
+                return
+            }
+        }
+        
         do {
-            try FileManager.default.removeItem(atPath: snapshot.path)
-            loadSnapshots(for: selectedApp!)
+            try FileManager.default.removeItem(atPath: targetPath)
+            loadSnapshots(for: app)
         } catch {
-            log("Error deleting snapshot: \(error)", type: .error)
+            log("Error deleting snapshot at \(targetPath): \(error)", type: .error)
         }
     }
     
@@ -1417,9 +1479,34 @@ class SimulatorService: ObservableObject {
         
         for app in validApps {
             do {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: app.snapshotsPath, isDirectory: &isDir), isDir.boolValue else {
+                    continue
+                }
                 let snapshotDirectories = try FileManager.default.contentsOfDirectory(atPath: app.snapshotsPath)
                 for snapshotDir in snapshotDirectories {
+                    if snapshotDir.hasPrefix(".") { continue }
                     let snapshotPath = "\(app.snapshotsPath)/\(snapshotDir)"
+                    var itemIsDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: snapshotPath, isDirectory: &itemIsDir), itemIsDir.boolValue else { continue }
+                    // Validate per-item safety
+                    guard isSafeSnapshotPath(snapshotPath, for: app) else {
+                        log("Skipping unsafe snapshot path: \(snapshotPath)", type: .error)
+                        continue
+                    }
+                    // Independent sanity checks
+                    let norm = normalizedPath(snapshotPath)
+                    if norm == normalizedPath(app.documentsPath) || norm == normalizedPath(app.snapshotsPath) || isPath(norm, underDirectory: app.documentsPath) {
+                        log("Skipping due to sanity check: \(snapshotPath)", type: .error)
+                        continue
+                    }
+                    if let sim = selectedSimulator {
+                        let normSim = normalizedPath(sim.dataPath)
+                        if norm == normSim || !isPath(norm, underDirectory: normSim) {
+                            log("Skipping due to simulator-root sanity check: \(snapshotPath)", type: .error)
+                            continue
+                        }
+                    }
                     try FileManager.default.removeItem(atPath: snapshotPath)
                 }
             } catch {
