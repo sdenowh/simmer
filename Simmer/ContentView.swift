@@ -525,6 +525,13 @@ struct SnapshotRowView: View {
     @ObservedObject var simulatorService: SimulatorService
     @EnvironmentObject var popoverWindowProvider: PopoverWindowProvider
     
+    static let dateTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        f.timeStyle = .short
+        return f
+    }()
+    
     private var currentApp: App? {
         simulatorService.apps.first { $0.id == app.id }
     }
@@ -548,11 +555,11 @@ struct SnapshotRowView: View {
                         .frame(width: 20)
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(snapshot.name)
+                        Text((snapshot.displayName?.isEmpty == false ? snapshot.displayName! : snapshot.name))
                             .font(.system(size: 11))
                             .foregroundColor(.primary)
                         
-                        Text(snapshot.date, style: .date)
+                        Text(SnapshotRowView.dateTimeFormatter.string(from: snapshot.date))
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
@@ -574,6 +581,11 @@ struct SnapshotRowView: View {
                 .padding(.leading, 60)
             }
             .buttonStyle(PlainButtonStyle())
+            .contextMenu {
+                Button("Rename") {
+                    showRenamePrompt()
+                }
+            }
             
             Button(action: {
                 simulatorService.deleteSnapshot(snapshot)
@@ -587,6 +599,29 @@ struct SnapshotRowView: View {
         }
     }
     
+    private func showRenamePrompt() {
+        #if os(macOS)
+        guard let window = popoverWindowProvider.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename Snapshot"
+        alert.informativeText = "Set an optional display name for this snapshot."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        let effectiveName = (snapshot.displayName?.isEmpty == false ? snapshot.displayName! : "")
+        textField.stringValue = effectiveName
+        alert.accessoryView = textField
+
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn {
+                simulatorService.renameSnapshotDisplayName(snapshot, to: textField.stringValue)
+            }
+        }
+        #endif
+    }
+
     private func showRestoreConfirmation() {
         guard let window = popoverWindowProvider.window else { return }
         let alert = NSAlert()

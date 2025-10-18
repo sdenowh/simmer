@@ -74,6 +74,7 @@ struct Snapshot: Identifiable, Hashable {
     var size: Int64
     let path: String
     var isLoadingSize: Bool = false
+    var displayName: String?
     
     mutating func startLoadingSize() {
         isLoadingSize = true
@@ -83,6 +84,10 @@ struct Snapshot: Identifiable, Hashable {
         size = calculatedSize
         isLoadingSize = false
     }
+}
+
+struct SnapshotMetadata: Codable {
+    var displayName: String?
 }
 
 struct DirectorySize {

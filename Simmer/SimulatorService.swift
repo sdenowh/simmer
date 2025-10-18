@@ -747,6 +747,18 @@ class SimulatorService: ObservableObject {
                     size: 0,
                     path: snapshotPath
                 )
+                // Load optional display name from metadata.json if present
+                let metadataPath = "\(snapshotPath)/metadata.json"
+                if FileManager.default.fileExists(atPath: metadataPath) {
+                    do {
+                        let data = try Data(contentsOf: URL(fileURLWithPath: metadataPath))
+                        if let decoded = try? JSONDecoder().decode(SnapshotMetadata.self, from: data) {
+                            snapshot.displayName = decoded.displayName
+                        }
+                    } catch {
+                        log("Failed to read snapshot metadata at \(metadataPath): \(error)", type: .error)
+                    }
+                }
                 snapshot.startLoadingSize()
                 
                 snapshots.append(snapshot)
@@ -770,6 +782,49 @@ class SimulatorService: ObservableObject {
         }
         
         return sortedSnapshots
+    }
+
+    // MARK: - Snapshot Metadata (Rename)
+    func renameSnapshotDisplayName(_ snapshot: Snapshot, to newName: String?) {
+        // Must have selected app context to ensure paths remain valid/fresh
+        guard let app = selectedApp else { return }
+        // Find current snapshot (by id) to get latest path
+        loadSnapshots(for: app)
+        guard let currentIndex = snapshots.firstIndex(where: { $0.id == snapshot.id }) else { return }
+        let current = snapshots[currentIndex]
+        let metadataPath = "\(current.path)/metadata.json"
+
+        let trimmed = newName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            // Clear display name by removing metadata file if exists
+            if FileManager.default.fileExists(atPath: metadataPath) {
+                do { try FileManager.default.removeItem(atPath: metadataPath) } catch {
+                    log("Failed to remove metadata.json: \(error)", type: .error)
+                }
+            }
+            DispatchQueue.main.async {
+                if let idx = self.snapshots.firstIndex(where: { $0.id == snapshot.id }) {
+                    self.snapshots[idx].displayName = nil
+                }
+            }
+            return
+        }
+
+        // Persist new display name
+        let metadata = SnapshotMetadata(displayName: trimmed)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+            let data = try encoder.encode(metadata)
+            try data.write(to: URL(fileURLWithPath: metadataPath), options: [.atomic])
+            DispatchQueue.main.async {
+                if let idx = self.snapshots.firstIndex(where: { $0.id == snapshot.id }) {
+                    self.snapshots[idx].displayName = trimmed
+                }
+            }
+        } catch {
+            log("Failed to write metadata.json: \(error)", type: .error)
+        }
     }
     
     private func calculateSnapshotSize(for snapshot: Snapshot, completion: @escaping (Int64) -> Void) {
