@@ -234,6 +234,27 @@ jobs:
           xcrun stapler staple "Simmer.dmg"
           /usr/sbin/spctl --assess --type open --verbose=4 "Simmer.dmg" || true
 
+      - name: "Package app as zip (for release asset)"
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
+          shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
+
+      - name: "Create GitHub Release and upload assets"
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Simmer ${{ github.ref_name }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
+          files: |
+            Simmer.dmg
+            Simmer.app.zip
+            checksums.txt
+          
       - name: "Upload signed artifacts"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
