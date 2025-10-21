@@ -33,9 +33,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xcode-
 
-      # ----------------------------
+      # --------------------------------
       # UNSIGNED BUILDS (PRs / non-tags)
-      # ----------------------------
+      # --------------------------------
       - name: "Build (unsigned for PRs & non-tag pushes)"
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
@@ -72,9 +72,9 @@ jobs:
             Simmer.app
             Simmer-unsigned.dmg
 
-      # ----------------------------
+      # --------------------------------
       # SIGNED + NOTARIZED RELEASE BUILDS (tags v*)
-      # ----------------------------
+      # --------------------------------
 
       - name: "Fail fast if required secrets are missing"
         if: startsWith(github.ref, 'refs/tags/v')
@@ -106,7 +106,7 @@ jobs:
           security find-identity -v -p codesigning | sed 's/^/IDENTITY: /'
           CN="$(security find-identity -v -p codesigning | sed -n "s/.*Developer ID Application: \(.*\) (${TEAM_ID}).*/Developer ID Application: \1 (${TEAM_ID})/p" | head -n1)"
           if [ -z "$CN" ]; then
-            echo "::error::No 'Developer ID Application: ... (${TEAM_ID})' identity installed."
+            echo "::error::No 'Developer ID Application: … (${TEAM_ID})' identity installed."
             exit 1
           fi
           echo "Using identity: $CN"
@@ -149,9 +149,10 @@ jobs:
 
       - name: "Codesign app (Developer ID + Hardened Runtime)"
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          IDENTITY: ${{ steps.pick_identity.outputs.IDENTITY }}
         run: |
           set -euo pipefail
-          IDENTITY="${{ steps.pick_identity.outputs.IDENTITY }}"
           ENT="Simmer/Simmer.entitlements"
           ENT_FLAG=""
           if [ -f "$ENT" ]; then
@@ -195,7 +196,6 @@ jobs:
 
       - name: "Notarize DMG (wait for result)"
         if: startsWith(github.ref, 'refs/tags/v')
-        id: notarize
         env:
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
@@ -208,24 +208,17 @@ jobs:
             --key AuthKey.p8 \
             --key-id "$APPLE_KEY_ID" \
             --issuer "$APPLE_ISSUER_ID" \
-            --wait --output-format json | tee notarize.json
+            --wait --output-format json > notarize.json
           rm -f AuthKey.p8
 
-          ID=$(python3 - << 'PY'
-import json
-d=json.load(open('notarize.json'))
-print(d.get('id',""))
-PY
-)
-          STATUS=$(python3 - << 'PY'
-import json
-d=json.load(open('notarize.json'))
-print(d.get('status',""))
-PY
-)
-          echo "Notarization ID: $ID"
-          echo "Notarization Status: $STATUS"
-          test "$STATUS" = "Accepted" || { echo "::error::Notarization failed or not accepted."; exit 1; }
+          STATUS="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize.json")).get("status",""))')"
+          ID="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize.json")).get("id",""))')"
+          echo "Notarization ID: ${ID}"
+          echo "Notarization Status: ${STATUS}"
+          if [ "${STATUS}" != "Accepted" ]; then
+            echo "::error::Notarization failed or not accepted."
+            exit 1
+          fi
 
       - name: "Staple notarization"
         if: startsWith(github.ref, 'refs/tags/v')
