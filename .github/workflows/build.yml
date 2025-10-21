@@ -2,7 +2,7 @@ name: Build & Ship Simmer (Direct Distribution)
 
 permissions:
   contents: write
-  
+
 on:
   push:
     branches: [ "main" ]
@@ -36,9 +36,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xcode-
 
-      # --------------------------------
+      # ----------------------------
       # UNSIGNED BUILDS (PRs / non-tags)
-      # --------------------------------
+      # ----------------------------
       - name: "Build (unsigned for PRs & non-tag pushes)"
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
@@ -63,8 +63,7 @@ jobs:
           echo "Found app at: $APP_PATH"
           rm -rf Simmer.app
           cp -R "$APP_PATH" Simmer.app
-      
-          # Make an unsigned DMG for inspection
+
           rm -f Simmer-unsigned.dmg
           mkdir -p dmg_temp
           cp -R "Simmer.app" dmg_temp/
@@ -80,9 +79,9 @@ jobs:
             Simmer.app
             Simmer-unsigned.dmg
 
-      # --------------------------------
+      # ----------------------------
       # SIGNED + NOTARIZED RELEASE BUILDS (tags v*)
-      # --------------------------------
+      # ----------------------------
 
       - name: "Fail fast if required secrets are missing"
         if: startsWith(github.ref, 'refs/tags/v')
@@ -90,6 +89,7 @@ jobs:
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           require() { test -n "${!1:-}" || { echo "::error::Missing secret/env: $1"; exit 1; }; }
@@ -98,6 +98,7 @@ jobs:
           require APPLE_ISSUER_ID
           require APPLE_KEY_ID
           require APPLE_API_KEY_P8
+          require SPARKLE_PRIVATE_KEY
 
       - name: "Import Developer ID signing cert"
         if: startsWith(github.ref, 'refs/tags/v')
@@ -144,7 +145,7 @@ jobs:
           echo "Found app at: $APP_PATH"
           rm -rf Simmer.app
           cp -R "$APP_PATH" Simmer.app
-    
+
       - name: "Sanity check / bundle identifier matches"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -156,7 +157,7 @@ jobs:
             echo "::error::Bundle ID mismatch. Expected ${BUNDLE_ID}, found ${ACTUAL}"
             exit 1
           fi
-    
+
       - name: "Codesign app (Developer ID + Hardened Runtime)"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -230,34 +231,69 @@ jobs:
             exit 1
           fi
 
-      - name: "Staple notarization"
+      - name: "Staple notarization (DMG)"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           xcrun stapler staple "Simmer.dmg"
           /usr/sbin/spctl --assess --type open --verbose=4 "Simmer.dmg" || true
 
-      # 1) Ensure we have the zipped app we want Sparkle to serve
+      # Create ZIP now (for Sparkle & release asset)
+      - name: "Package app as zip"
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          rm -f Simmer.app.zip
+          ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
+          shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
+
+      # Notarize the APP so the Sparkle ZIP contains a stapled app (best UX)
+      - name: "Notarize APP (for Sparkle ZIP)"
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_API_KEY_P8" > AuthKey.p8
+          chmod 600 AuthKey.p8
+          xcrun notarytool submit "Simmer.app" \
+            --key AuthKey.p8 --key-id "$APPLE_KEY_ID" --issuer "$APPLE_ISSUER_ID" \
+            --wait --output-format json > notarize-app.json
+          rm -f AuthKey.p8
+          STATUS="$(/usr/bin/python3 -c 'import json;print(json.load(open("notarize-app.json")).get("status",""))')"
+          echo "App notarization status: ${STATUS}"
+          [ "$STATUS" = "Accepted" ] || { echo "::error::App notarization failed"; exit 1; }
+
+      - name: "Staple notarization (APP) and repackage ZIP"
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          xcrun stapler staple "Simmer.app"
+          /usr/sbin/spctl --assess --type execute --verbose=4 "Simmer.app" || true
+          rm -f Simmer.app.zip
+          ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
+          shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
+
+      # 1) Prepare updates/ for Sparkle (ZIP goes here)
       - name: "Sparkle: prepare updates folder"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
           rm -rf updates
           mkdir -p updates
-          # You already created Simmer.app.zip earlier for releases
           cp "Simmer.app.zip" updates/
-          # Optional: if you have HTML release notes, drop them next to the zip as Simmer.app.html
-          # cp path/to/release-notes.html updates/Simmer.app.html
-      
-      # 2) Install Sparkle CLI tools (generate_appcast, sign_update, etc.)
+          # Optional: cp release-notes HTML to updates/Simmer.app.html
+
+      # 2) Install Sparkle CLI (generate_appcast)
       - name: "Install Sparkle CLI"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: jozefizso/setup-sparkle@v1
         with:
-          # Pin a current release; update over time
           version: 2.8.0
-      
-      # 3) Generate appcast with EdDSA signature; pass private key via stdin (best practice)
+
+      # 3) Generate appcast; pipe EdDSA private key via stdin (best practice)
       - name: "Sparkle: generate appcast with signatures & deltas"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -265,12 +301,10 @@ jobs:
         run: |
           set -euo pipefail
           cd updates
-          # Pipe the private key to stdin; Sparkle recommends --ed-key-file - for CI
-          # This generates appcast.xml and delta updates beside your zip
           printf "%s" "$SPARKLE_PRIVATE_KEY" | generate_appcast --ed-key-file - .
           ls -la
-      
-      # 4) Publish to GitHub Pages under /simmer
+
+      # 4) Publish /updates to gh-pages:/simmer
       - name: "Publish appcast + zips to gh-pages:/simmer"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: peaceiris/actions-gh-pages@v4
@@ -282,13 +316,7 @@ jobs:
           keep_files: true
           commit_message: "Update Sparkle feed for ${{ github.ref_name }}"
 
-      - name: "Package app as zip (for release asset)"
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
-          shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
-
+      # GitHub Release (DMG + ZIP + checksums)
       - name: "Create GitHub Release and upload assets"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -302,7 +330,7 @@ jobs:
             Simmer.dmg
             Simmer.app.zip
             checksums.txt
-          
+
       - name: "Upload signed artifacts"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
