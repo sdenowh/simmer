@@ -236,8 +236,9 @@ jobs:
         run: |
           set -euo pipefail
           xcrun stapler staple "Simmer.dmg"
-          /usr/sbin/spctl --assess --type open --verbose=4 "Simmer.dmg" || true
-
+          # Validate staple (CI-friendly). 'spctl' often shows "Insufficient Context" in CI.
+          xcrun stapler validate "Simmer.dmg"
+    
       # Create ZIP now (for Sparkle & release asset)
       - name: "Package app as zip"
         if: startsWith(github.ref, 'refs/tags/v')
@@ -248,7 +249,7 @@ jobs:
           shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
 
       # Notarize the APP so the Sparkle ZIP contains a stapled app (best UX)
-      - name: "Notarize APP (for Sparkle ZIP)"
+      - name: "Notarize APP ZIP (for Sparkle)"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
@@ -258,20 +259,25 @@ jobs:
           set -euo pipefail
           echo "$APPLE_API_KEY_P8" > AuthKey.p8
           chmod 600 AuthKey.p8
-          xcrun notarytool submit "Simmer.app" \
+          # Notarize the ZIP that contains Simmer.app
+          xcrun notarytool submit "Simmer.app.zip" \
             --key AuthKey.p8 --key-id "$APPLE_KEY_ID" --issuer "$APPLE_ISSUER_ID" \
-            --wait --output-format json > notarize-app.json
+            --wait --output-format json > notarize-appzip.json
           rm -f AuthKey.p8
-          STATUS="$(/usr/bin/python3 -c 'import json;print(json.load(open("notarize-app.json")).get("status",""))')"
-          echo "App notarization status: ${STATUS}"
-          [ "$STATUS" = "Accepted" ] || { echo "::error::App notarization failed"; exit 1; }
+          STATUS="$(/usr/bin/python3 -c 'import json;print(json.load(open("notarize-appzip.json")).get("status",""))')"
+          echo "App ZIP notarization status: ${STATUS}"
+          [ "$STATUS" = "Accepted" ] || { echo "::error::App ZIP notarization failed"; exit 1; }
 
       - name: "Staple notarization (APP) and repackage ZIP"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
+          # Staple the app bundle itself
           xcrun stapler staple "Simmer.app"
+          xcrun stapler validate "Simmer.app" || true
           /usr/sbin/spctl --assess --type execute --verbose=4 "Simmer.app" || true
+
+          # IMPORTANT: Repack the zip so the distributed archive contains the stapled app
           rm -f Simmer.app.zip
           ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
           shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
