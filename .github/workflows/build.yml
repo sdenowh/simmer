@@ -51,15 +51,20 @@ jobs:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
           set -euo pipefail
+          APP_PATH="$(/usr/bin/find build/Build/Products -type d -name 'Simmer.app' -path '*/Release/*' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find Simmer.app under build/Build/Products (did the scheme build an app?)"
+            /usr/bin/find build -maxdepth 4 -type d -name '*.app' -print || true
+            exit 1
+          fi
+          echo "Found app at: $APP_PATH"
           rm -rf Simmer.app
-          mkdir -p Simmer.app/Contents/MacOS
-          mkdir -p Simmer.app/Contents/Resources
-          cp build/Build/Products/Release/Simmer Simmer.app/Contents/MacOS/
-          cp Simmer/Info.plist Simmer.app/Contents/
-          cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
-          chmod +x Simmer.app/Contents/MacOS/Simmer
+          cp -R "$APP_PATH" Simmer.app
+      
+          # Make an unsigned DMG for inspection
+          rm -f Simmer-unsigned.dmg
           mkdir -p dmg_temp
-          cp -r Simmer.app dmg_temp/
+          cp -R "Simmer.app" dmg_temp/
           hdiutil create -volname "Simmer" -srcfolder dmg_temp -ov -format UDZO Simmer-unsigned.dmg
           rm -rf dmg_temp
 
@@ -127,26 +132,28 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
+          APP_PATH="$(/usr/bin/find build/Build/Products -type d -name 'Simmer.app' -path '*/Release/*' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Could not find Simmer.app under build/Build/Products (did the scheme build an app?)"
+            /usr/bin/find build -maxdepth 4 -type d -name '*.app' -print || true
+            exit 1
+          fi
+          echo "Found app at: $APP_PATH"
           rm -rf Simmer.app
-          mkdir -p Simmer.app/Contents/MacOS
-          mkdir -p Simmer.app/Contents/Resources
-          cp build/Build/Products/Release/Simmer Simmer.app/Contents/MacOS/
-          cp Simmer/Info.plist Simmer.app/Contents/
-          cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
-          chmod +x Simmer.app/Contents/MacOS/Simmer
-
+          cp -R "$APP_PATH" Simmer.app
+    
       - name: "Sanity check / bundle identifier matches"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
-          ACTUAL=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Simmer/Info.plist")
+          ACTUAL=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Simmer.app/Contents/Info.plist")
           echo "Declared BUNDLE_ID (secret): ${BUNDLE_ID}"
-          echo "Info.plist CFBundleIdentifier: ${ACTUAL}"
+          echo "Built app CFBundleIdentifier: ${ACTUAL}"
           if [ "${ACTUAL}" != "${BUNDLE_ID}" ]; then
             echo "::error::Bundle ID mismatch. Expected ${BUNDLE_ID}, found ${ACTUAL}"
             exit 1
           fi
-
+    
       - name: "Codesign app (Developer ID + Hardened Runtime)"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
