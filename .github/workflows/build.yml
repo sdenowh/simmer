@@ -1,4 +1,4 @@
-name: Build Simmer
+name: Build & Ship Simmer (Direct Distribution)
 
 on:
   push:
@@ -11,6 +11,11 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+
+    env:
+      # Used only on tag builds; defined as GitHub Secrets
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      BUNDLE_ID: ${{ secrets.BUNDLE_ID }}
 
     steps:
       - name: Checkout code
@@ -29,10 +34,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xcode-
 
-      # ---------- UNSIGNED BUILDS FOR PRs / non-tag pushes ----------
-      - name: Build (unsigned for PRs)
+      # ----------------------------
+      # UNSIGNED BUILDS (PRs / non-tags)
+      # ----------------------------
+      - name: Build (unsigned for PRs & non-tag pushes)
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
+          set -euo pipefail
           xcodebuild -project Simmer.xcodeproj \
             -scheme Simmer \
             -configuration Release \
@@ -43,6 +51,8 @@ jobs:
       - name: Create app bundle (unsigned)
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
+          set -euo pipefail
+          rm -rf Simmer.app
           mkdir -p Simmer.app/Contents/MacOS
           mkdir -p Simmer.app/Contents/Resources
           cp build/Build/Products/Release/Simmer Simmer.app/Contents/MacOS/
@@ -64,7 +74,25 @@ jobs:
             Simmer.app
             Simmer-unsigned.dmg
 
-      # ---------- SIGNED + NOTARIZED RELEASE BUILDS (tags v*) ----------
+      # ----------------------------
+      # SIGNED + NOTARIZED RELEASE BUILDS (tags v*)
+      # ----------------------------
+
+      - name: Fail fast if required secrets are missing
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          require() { test -n "${!1:-}" || { echo "::error::Missing secret/env: $1"; exit 1; }; }
+          require TEAM_ID
+          require BUNDLE_ID
+          require APPLE_ISSUER_ID
+          require APPLE_KEY_ID
+          require APPLE_API_KEY_P8
+        env:
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+
       - name: Import Developer ID signing cert
         if: startsWith(github.ref, 'refs/tags/v')
         uses: apple-actions/import-codesign-certs@v3
@@ -72,21 +100,37 @@ jobs:
           p12-file-base64: ${{ secrets.DEV_ID_CERT_P12 }}
           p12-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
 
-      - name: Build (code signing allowed)
+      - name: Sanity check: Developer ID identity present for TEAM_ID
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: pick_identity
+        run: |
+          set -euo pipefail
+          security find-identity -v -p codesigning | sed 's/^/IDENTITY: /'
+          # Extract the exact CN for Developer ID Application matching the TEAM_ID
+          CN=$(security find-identity -v -p codesigning | \
+               sed -n "s/.*Developer ID Application: \(.*\) (${TEAM_ID}).*/Developer ID Application: \1 (${TEAM_ID})/p" | head -n1)
+          if [ -z "${CN}" ]; then
+            echo "::error::No 'Developer ID Application: ... (${TEAM_ID})' identity installed."
+            exit 1
+          fi
+          echo "Using identity: ${CN}"
+          echo "IDENTITY=${CN}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Release, no signing in build phase)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          # Use manual identity to avoid Xcode trying to fetch dev profiles
+          set -euo pipefail
           xcodebuild -project Simmer.xcodeproj \
             -scheme Simmer \
             -configuration Release \
             -derivedDataPath build \
-            CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=${{ secrets.TEAM_ID }} \
+            CODE_SIGNING_ALLOWED=NO \
             build
 
       - name: Create app bundle (to sign)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
+          set -euo pipefail
           rm -rf Simmer.app
           mkdir -p Simmer.app/Contents/MacOS
           mkdir -p Simmer.app/Contents/Resources
@@ -95,51 +139,111 @@ jobs:
           cp -r Simmer/Assets.xcassets Simmer.app/Contents/Resources/
           chmod +x Simmer.app/Contents/MacOS/Simmer
 
-      - name: Codesign app (Developer ID Application)
+      - name: Sanity check: Bundle Identifier matches expected
         if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
-          # Adjust identity string to match your cert's Common Name
-          IDENTITY="Developer ID Application: YOUR COMPANY NAME (${TEAM_ID})"
-          # If you have entitlements (recommended for Hardened Runtime), reference them:
-          # ENT="Simmer/Simmer.entitlements"
-          # Add --entitlements "$ENT" if present.
+          set -euo pipefail
+          ACTUAL=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Simmer/Info.plist")
+          echo "Declared BUNDLE_ID (secret): ${BUNDLE_ID}"
+          echo "Info.plist CFBundleIdentifier: ${ACTUAL}"
+          if [ "${ACTUAL}" != "${BUNDLE_ID}" ]; then
+            echo "::error::Bundle ID mismatch. Expected ${BUNDLE_ID}, found ${ACTUAL}"
+            exit 1
+          fi
+
+      - name: Codesign app (Developer ID Application + Hardened Runtime)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          IDENTITY="${{ steps.pick_identity.outputs.IDENTITY }}"
+
+          # Optional entitlements — use if present
+          ENT="Simmer/Simmer.entitlements"
+          ENT_ARG=()
+          if [ -f "$ENT" ]; then
+            echo "Using entitlements: $ENT"
+            ENT_ARG=(--entitlements "$ENT")
+          fi
+
+          # Deep sign everything; runtime = Hardened Runtime; timestamp = required for notarization
           codesign --deep --force --options runtime --timestamp \
-            --sign "$IDENTITY" \
+            --sign "$IDENTITY" "${ENT_ARG[@]}" \
             "Simmer.app"
 
+          echo "Verifying signature…"
           codesign --verify --deep --strict --verbose=2 "Simmer.app"
+          spctl --assess --type execute --verbose=4 "Simmer.app" || true
 
-      - name: Create signed DMG
+      - name: Create DMG (signed app inside)
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
+          set -euo pipefail
+          rm -f Simmer.dmg
           mkdir -p dmg_temp
-          cp -r Simmer.app dmg_temp/
+          cp -R "Simmer.app" dmg_temp/
           hdiutil create -volname "Simmer" -srcfolder dmg_temp -ov -format UDZO Simmer.dmg
           rm -rf dmg_temp
 
-      - name: Notarize DMG with notarytool
+      - name: Validate Apple API key credentials (notarytool)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
-          # Write API key to file with restricted perms
-          echo "$APPLE_API_KEY_P8" > ./AuthKey.p8
-          chmod 600 ./AuthKey.p8
-
-          xcrun notarytool submit "Simmer.dmg" \
-            --key ./AuthKey.p8 \
+          set -euo pipefail
+          echo "$APPLE_API_KEY_P8" > AuthKey.p8
+          chmod 600 AuthKey.p8
+          # Store a temporary profile and validate connectivity
+          xcrun notarytool store-credentials "ac-creds" \
+            --key AuthKey.p8 \
             --key-id "$APPLE_KEY_ID" \
             --issuer "$APPLE_ISSUER_ID" \
-            --wait
+            --validate
+          rm -f AuthKey.p8
+
+      - name: Notarize DMG (wait for result)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: notarize
+        env:
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_API_KEY_P8" > AuthKey.p8
+          chmod 600 AuthKey.p8
+          SUBMIT_OUT=$(xcrun notarytool submit "Simmer.dmg" \
+            --key AuthKey.p8 \
+            --key-id "$APPLE_KEY_ID" \
+            --issuer "$APPLE_ISSUER_ID" \
+            --wait --output-format json)
+          rm -f AuthKey.p8
+          echo "$SUBMIT_OUT" | tee notarize.json
+          # Extract id and status for logs
+          ID=$(python3 - << 'PY'
+import json,sys
+d=json.load(open('notarize.json'))
+print(d.get('id',""))
+PY
+)
+          STATUS=$(python3 - << 'PY'
+import json,sys
+d=json.load(open('notarize.json'))
+print(d.get('status',""))
+PY
+)
+          echo "Notarization ID: $ID"
+          echo "Notarization Status: $STATUS"
+          test "$STATUS" = "Accepted" || { echo "::error::Notarization failed or not accepted."; exit 1; }
 
       - name: Staple notarization
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
+          set -euo pipefail
           xcrun stapler staple "Simmer.dmg"
+          # Final assess on DMG (non-fatal if spctl heuristics vary)
+          spctl --assess --type open --verbose=4 "Simmer.dmg" || true
 
       - name: Upload signed artifacts
         if: startsWith(github.ref, 'refs/tags/v')
