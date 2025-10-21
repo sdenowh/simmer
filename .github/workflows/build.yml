@@ -237,6 +237,51 @@ jobs:
           xcrun stapler staple "Simmer.dmg"
           /usr/sbin/spctl --assess --type open --verbose=4 "Simmer.dmg" || true
 
+      # 1) Ensure we have the zipped app we want Sparkle to serve
+      - name: "Sparkle: prepare updates folder"
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          rm -rf updates
+          mkdir -p updates
+          # You already created Simmer.app.zip earlier for releases
+          cp "Simmer.app.zip" updates/
+          # Optional: if you have HTML release notes, drop them next to the zip as Simmer.app.html
+          # cp path/to/release-notes.html updates/Simmer.app.html
+      
+      # 2) Install Sparkle CLI tools (generate_appcast, sign_update, etc.)
+      - name: "Install Sparkle CLI"
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: jozefizso/setup-sparkle@v1
+        with:
+          # Pin a current release; update over time
+          version: 2.8.0
+      
+      # 3) Generate appcast with EdDSA signature; pass private key via stdin (best practice)
+      - name: "Sparkle: generate appcast with signatures & deltas"
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          cd updates
+          # Pipe the private key to stdin; Sparkle recommends --ed-key-file - for CI
+          # This generates appcast.xml and delta updates beside your zip
+          printf "%s" "$SPARKLE_PRIVATE_KEY" | generate_appcast --ed-key-file - .
+          ls -la
+      
+      # 4) Publish to GitHub Pages under /simmer
+      - name: "Publish appcast + zips to gh-pages:/simmer"
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: updates
+          publish_branch: gh-pages
+          destination_dir: simmer
+          keep_files: true
+          commit_message: "Update Sparkle feed for ${{ github.ref_name }}"
+
       - name: "Package app as zip (for release asset)"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
