@@ -36,5 +36,9 @@
 	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>$(INFOPLIST_KEY_LSApplicationCategoryType)</string>
+    <key>SUPublicEDKey</key>
+    <string>ZqrPIhmnVcHPcxr6hlAjSvG3jHf5ECquChjdABdE5A8=</string>
+    <key>SUFeedURL</key>
+    <string>https://sdenowh.github.io/simmer/simmer/appcast.xml</string>
 </dict>
 </plist>

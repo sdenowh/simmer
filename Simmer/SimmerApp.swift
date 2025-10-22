@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import Sparkle
 
 class PopoverWindowProvider: ObservableObject {
     weak var window: NSWindow?
@@ -33,16 +34,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let simulatorService = SimulatorService() // Shared instance
     private var contentView: ContentView?
     private let popoverWindowProvider = PopoverWindowProvider()
+    private var updaterController: SPUStandardUpdaterController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupPopover()
         setupKeyboardShortcuts()
         setupEditMenu()
+        // Initialize Sparkle updater
+        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         // Show the popover automatically on launch, after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.togglePopover()
         }
+    }
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        updaterController?.checkForUpdates(sender)
     }
     
     private func setupKeyboardShortcuts() {

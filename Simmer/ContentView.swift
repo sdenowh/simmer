@@ -49,6 +49,14 @@ struct ContentView: View {
                     
                     Divider()
                     
+                    Button("Check for Updates…") {
+                        #if os(macOS)
+                        NSApp.sendAction(#selector(AppDelegate.checkForUpdates(_:)), to: nil, from: nil)
+                        #endif
+                    }
+                    
+                    Divider()
+                    
                     Text("Version \(getAppVersion())")
                         .disabled(true)
                     
