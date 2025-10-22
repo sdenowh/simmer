@@ -54,6 +54,12 @@ struct ContentView: View {
                         NSApp.sendAction(#selector(AppDelegate.checkForUpdates(_:)), to: nil, from: nil)
                         #endif
                     }
+
+                    Button("About Simmer") {
+                        #if os(macOS)
+                        AboutWindowController.shared.showAbout()
+                        #endif
+                    }
                     
                     Divider()
                     
