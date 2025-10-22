@@ -32,9 +32,10 @@ class SimulatorService: ObservableObject {
         // Use NSLog for release builds to ensure visibility in Console.app
         #if DEBUG
         logger.log(level: type, "\(message)")
-        #endif
+        #else
         NSLog("[Simmer] \(message)")
         print("[Simmer] \(message)")
+        #endif
     }
     
     @Published var simulators: [Simulator] = []
