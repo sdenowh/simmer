@@ -36,9 +36,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xcode-
 
-      # ----------------------------
+      # --------------------------------
       # UNSIGNED BUILDS (PRs / non-tags)
-      # ----------------------------
+      # --------------------------------
       - name: "Build (unsigned for PRs & non-tag pushes)"
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v'))
         run: |
@@ -79,9 +79,9 @@ jobs:
             Simmer.app
             Simmer-unsigned.dmg
 
-      # ----------------------------
+      # --------------------------------
       # SIGNED + NOTARIZED RELEASE BUILDS (tags v*)
-      # ----------------------------
+      # --------------------------------
 
       - name: "Fail fast if required secrets are missing"
         if: startsWith(github.ref, 'refs/tags/v')
@@ -219,15 +219,15 @@ jobs:
             --key AuthKey.p8 \
             --key-id "$APPLE_KEY_ID" \
             --issuer "$APPLE_ISSUER_ID" \
-            --wait --output-format json > notarize.json
+            --wait --output-format json > notarize_dmg.json
           rm -f AuthKey.p8
 
-          STATUS="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize.json")).get("status",""))')"
-          ID="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize.json")).get("id",""))')"
-          echo "Notarization ID: ${ID}"
-          echo "Notarization Status: ${STATUS}"
+          STATUS="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize_dmg.json")).get("status",""))')"
+          ID="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open("notarize_dmg.json")).get("id",""))')"
+          echo "DMG Notarization ID: ${ID}"
+          echo "DMG Notarization Status: ${STATUS}"
           if [ "${STATUS}" != "Accepted" ]; then
-            echo "::error::Notarization failed or not accepted."
+            echo "::error::DMG notarization failed or not accepted."
             exit 1
           fi
 
@@ -236,10 +236,10 @@ jobs:
         run: |
           set -euo pipefail
           xcrun stapler staple "Simmer.dmg"
-          # Validate staple (CI-friendly). 'spctl' often shows "Insufficient Context" in CI.
+          # Validate staple in CI. 'spctl' often shows 'Insufficient Context' on CI artifacts.
           xcrun stapler validate "Simmer.dmg"
-    
-      # Create ZIP now (for Sparkle & release asset)
+
+      # ---------- ZIP the APP for Sparkle & Release ----------
       - name: "Package app as zip"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -247,8 +247,9 @@ jobs:
           rm -f Simmer.app.zip
           ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
           shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
+          ls -la
 
-      # Notarize the APP so the Sparkle ZIP contains a stapled app (best UX)
+      # ---------- Notarize the APP ZIP (required), then staple the app ----------
       - name: "Notarize APP ZIP (for Sparkle)"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -259,12 +260,11 @@ jobs:
           set -euo pipefail
           echo "$APPLE_API_KEY_P8" > AuthKey.p8
           chmod 600 AuthKey.p8
-          # Notarize the ZIP that contains Simmer.app
           xcrun notarytool submit "Simmer.app.zip" \
             --key AuthKey.p8 --key-id "$APPLE_KEY_ID" --issuer "$APPLE_ISSUER_ID" \
-            --wait --output-format json > notarize-appzip.json
+            --wait --output-format json > notarize_appzip.json
           rm -f AuthKey.p8
-          STATUS="$(/usr/bin/python3 -c 'import json;print(json.load(open("notarize-appzip.json")).get("status",""))')"
+          STATUS="$(/usr/bin/python3 -c 'import json;print(json.load(open("notarize_appzip.json")).get("status",""))')"
           echo "App ZIP notarization status: ${STATUS}"
           [ "$STATUS" = "Accepted" ] || { echo "::error::App ZIP notarization failed"; exit 1; }
 
@@ -272,17 +272,18 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
-          # Staple the app bundle itself
+          # Staple the app bundle that was inside the notarized zip
           xcrun stapler staple "Simmer.app"
           xcrun stapler validate "Simmer.app" || true
           /usr/sbin/spctl --assess --type execute --verbose=4 "Simmer.app" || true
 
-          # IMPORTANT: Repack the zip so the distributed archive contains the stapled app
+          # Repack the zip so the distributed archive contains the STAPLED app
           rm -f Simmer.app.zip
           ditto -ck --sequesterRsrc --keepParent "Simmer.app" "Simmer.app.zip"
           shasum -a 256 "Simmer.dmg" "Simmer.app.zip" > checksums.txt
+          ls -la
 
-      # 1) Prepare updates/ for Sparkle (ZIP goes here)
+      # ---------- Sparkle on GitHub Pages ----------
       - name: "Sparkle: prepare updates folder"
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -290,16 +291,14 @@ jobs:
           rm -rf updates
           mkdir -p updates
           cp "Simmer.app.zip" updates/
-          # Optional: cp release-notes HTML to updates/Simmer.app.html
+          # If you keep release notes HTML, you can also place them here as: updates/Simmer.app.html
 
-      # 2) Install Sparkle CLI (generate_appcast)
       - name: "Install Sparkle CLI"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: jozefizso/setup-sparkle@v1
         with:
           version: 2.8.0
 
-      # 3) Generate appcast; pipe EdDSA private key via stdin (best practice)
       - name: "Sparkle: generate appcast with signatures & deltas"
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -310,7 +309,6 @@ jobs:
           printf "%s" "$SPARKLE_PRIVATE_KEY" | generate_appcast --ed-key-file - .
           ls -la
 
-      # 4) Publish /updates to gh-pages:/simmer
       - name: "Publish appcast + zips to gh-pages:/simmer"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: peaceiris/actions-gh-pages@v4
@@ -322,11 +320,12 @@ jobs:
           keep_files: true
           commit_message: "Update Sparkle feed for ${{ github.ref_name }}"
 
-      # GitHub Release (DMG + ZIP + checksums)
+      # ---------- GitHub Release ----------
       - name: "Create GitHub Release and upload assets"
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref_name }}
           name: "Simmer ${{ github.ref_name }}"
           draft: false
