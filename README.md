@@ -2,7 +2,9 @@
 
 A macOS menubar app for iOS Simulator management. Quickly browse simulators, inspect installed apps, open Documents folders, and snapshot/restore app data.
 
-![Simmer screenshot](screenshot.png)
+<p align="center">
+  <img src="screenshot.png" alt="App screenshot" width="321" height="502">
+</p>
 
 ## Features
 
