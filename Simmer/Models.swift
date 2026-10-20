@@ -16,14 +16,29 @@ struct Simulator: Identifiable, Hashable, Codable {
     let udid: String
     let dataPath: String
     var isPinned: Bool = false
-    
+    var lastBootedAt: Date? = nil
+
     var formattedVersion: String {
-        // Remove any leading 'iOS-' or 'iOS' and replace dashes with dots
-        let cleaned = iOSVersion.replacingOccurrences(of: "iOS-", with: "")
-                                 .replacingOccurrences(of: "iOS", with: "")
-                                 .replacingOccurrences(of: "-", with: ".")
-                                 .trimmingCharacters(in: .whitespacesAndNewlines)
-        return "iOS " + cleaned
+        Self.formatRuntime(iOSVersion)
+    }
+
+    /// Turns a CoreSimulator runtime id into a display string.
+    /// `tvOS-26-5` stays tvOS; only an iOS runtime is labeled iOS.
+    static func formatRuntime(_ raw: String) -> String {
+        var value = raw.replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let platforms = ["watchOS", "visionOS", "tvOS", "xrOS", "iOS"]
+        var platform = "iOS"
+        for candidate in platforms where value.hasPrefix(candidate) {
+            platform = candidate == "xrOS" ? "visionOS" : candidate
+            value = String(value.dropFirst(candidate.count))
+            break
+        }
+        let version = value
+            .trimmingCharacters(in: CharacterSet(charactersIn: "- "))
+            .replacingOccurrences(of: "-", with: ".")
+        if version.isEmpty { return platform }
+        return "\(platform) \(version)"
     }
     
     enum DeviceType: String, CaseIterable, Codable {
@@ -31,6 +46,16 @@ struct Simulator: Identifiable, Hashable, Codable {
         case iPad = "iPad"
         case appleTV = "Apple TV"
         case appleWatch = "Apple Watch"
+
+        /// Device type identifiers use hyphens (`Apple-TV-4K`), not the compact `AppleTV` token.
+        static func resolve(_ deviceTypeString: String) -> DeviceType {
+            let normalized = deviceTypeString.replacingOccurrences(of: "-", with: "")
+            if normalized.contains("iPhone") { return .iPhone }
+            if normalized.contains("iPad") { return .iPad }
+            if normalized.contains("AppleTV") { return .appleTV }
+            if normalized.contains("Watch") { return .appleWatch }
+            return .iPhone
+        }
         
         var icon: String {
             switch self {

@@ -163,7 +163,9 @@ struct ContentView: View {
 //                    .cornerRadius(12)
                     .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
                 }
-                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .allowsHitTesting(true)
                 .transition(.asymmetric(
                     insertion: .move(edge: .bottom).combined(with: .opacity),
                     removal: .move(edge: .bottom).combined(with: .opacity)
@@ -188,6 +190,39 @@ private func maskedAppIcon(from image: NSImage, cornerRadius: CGFloat = 16) -> N
     newImage.unlockFocus()
     return newImage
 }
+
+func simmerAppIcon(from iconPath: String?) -> NSImage? {
+    guard let iconPath, !iconPath.isEmpty else { return nil }
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: iconPath, isDirectory: &isDirectory) {
+        if isDirectory.boolValue {
+            return NSWorkspace.shared.icon(forFile: iconPath)
+        }
+        if let image = NSImage(contentsOfFile: iconPath) {
+            return image
+        }
+    }
+    return NSImage(named: iconPath)
+}
+
+func presentSimmerAlert(_ alert: NSAlert, window: NSWindow?, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+    if let window {
+        alert.beginSheetModal(for: window, completionHandler: completion)
+    } else if let keyWindow = NSApp.keyWindow {
+        alert.beginSheetModal(for: keyWindow, completionHandler: completion)
+    } else {
+        completion(alert.runModal())
+    }
+}
+
+func presentSimmerAlert(message: String, window: NSWindow?) {
+    let alert = NSAlert()
+    alert.messageText = "Simmer"
+    alert.informativeText = message
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "OK")
+    presentSimmerAlert(alert, window: window) { _ in }
+}
 #endif
 
 struct SimulatorRowView: View {
@@ -197,48 +232,49 @@ struct SimulatorRowView: View {
     @ObservedObject var simulatorService: SimulatorService
     
     var body: some View {
-        Button(action: onTap) {
-            HStack {
-                Image(systemName: simulator.deviceType.icon)
-                    .foregroundColor(.blue)
-                    .frame(width: 20)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(simulator.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.primary)
+        HStack(spacing: 0) {
+            Button(action: onTap) {
+                HStack {
+                    Image(systemName: simulator.deviceType.icon)
+                        .foregroundColor(.blue)
+                        .frame(width: 20)
                     
-                    Text(simulator.formattedVersion)
-                        .font(.system(size: 11))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(simulator.name)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.primary)
+                        
+                        Text(simulator.formattedVersion)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: isSelected ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }
-                
-                Spacer()
-                
-                // Pin button
-                Button(action: {
-                    simulatorService.togglePin(for: simulator)
-                }) {
-                    Image(systemName: simulator.isPinned ? "pin.fill" : "pin")
-                        .foregroundColor(simulator.isPinned ? .orange : .secondary)
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(PlainButtonStyle())
-                
-                // Disclosure chevron
-                Image(systemName: isSelected ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .padding(.trailing, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
-            .contentShape(Rectangle())
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: {
+                simulatorService.togglePin(for: simulator)
+            }) {
+                Image(systemName: simulator.isPinned ? "pin.fill" : "pin")
+                    .foregroundColor(simulator.isPinned ? .orange : .secondary)
+                    .font(.system(size: 12))
+                    .frame(width: 28, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .padding(.trailing, 4)
         }
-        .buttonStyle(PlainButtonStyle())
-        .background(Color.clear)
+        .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
     }
 }
 
@@ -251,7 +287,7 @@ struct AppRowView: View {
         Button(action: onTap) {
             HStack {
                 // App icon
-                if let iconPath = app.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+                if let image = simmerAppIcon(from: app.iconPath) {
                     Image(nsImage: image)
                         .resizable()
                         .frame(width: 20, height: 20)
@@ -286,9 +322,11 @@ struct AppRowView: View {
 struct AppActionsView: View {
     let app: App
     @ObservedObject var simulatorService: SimulatorService
+    @EnvironmentObject var popoverWindowProvider: PopoverWindowProvider
     @State private var isShowingPushSheet: Bool = false
     @State private var pushPayloadText: String = ""
     @State private var pushDescriptionText: String = ""
+    @State private var pushSheetError: String = ""
     @State private var lastSendError: String = ""
     
     private var currentApp: App? {
@@ -312,7 +350,9 @@ struct AppActionsView: View {
         VStack(spacing: 0) {
             // Show Documents Folder
             Button(action: {
-                simulatorService.openDocumentsFolder(for: app)
+                if let message = simulatorService.openDocumentsFolder(for: displayApp) {
+                    presentSimmerAlert(message: message, window: popoverWindowProvider.window)
+                }
             }) {
                 HStack {
                     Image(systemName: "folder")
@@ -375,7 +415,7 @@ struct AppActionsView: View {
                 // Delete All Snapshots
                 if !simulatorService.snapshots.isEmpty {
                     Button(action: {
-                        simulatorService.deleteAllSnapshots()
+                        showDeleteAllConfirmation()
                     }) {
                         HStack {
                             Image(systemName: "trash")
@@ -408,6 +448,7 @@ struct AppActionsView: View {
                 // Push Notifications
                 VStack(spacing: 0) {
                     Button(action: {
+                        pushSheetError = ""
                         prepareDefaultPushPayload()
                         isShowingPushSheet = true
                     }) {
@@ -505,15 +546,18 @@ struct AppActionsView: View {
                 },
                 onSend: {
                     guard let sim = simulatorService.selectedSimulator else { return }
+                    pushSheetError = ""
                     lastSendError = ""
                     simulatorService.sendPushNotification(payloadJSON: pushPayloadText, name: pushDescriptionText.isEmpty ? nil : pushDescriptionText, for: app, on: sim) { success, error in
                         if success {
                             isShowingPushSheet = false
                         } else {
-                            lastSendError = error ?? "Unknown error"
+                            pushSheetError = error ?? "Unknown error"
+                            lastSendError = pushSheetError
                         }
                     }
-                }
+                },
+                errorText: pushSheetError
             )
             .frame(width: 520, height: 360)
         }
@@ -530,6 +574,20 @@ struct AppActionsView: View {
     private func displayName(for item: SentNotification) -> String {
         let trimmed = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "(untitled)" : trimmed
+    }
+
+    private func showDeleteAllConfirmation() {
+        let alert = NSAlert()
+        alert.messageText = "Delete All Snapshots"
+        alert.informativeText = "This deletes every snapshot for \(app.name). Other apps on this simulator are left alone. This action cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        presentSimmerAlert(alert, window: popoverWindowProvider.window) { response in
+            if response == .alertFirstButtonReturn {
+                simulatorService.deleteAllSnapshots(for: displayApp)
+            }
+        }
     }
 }
 
@@ -615,7 +673,6 @@ struct SnapshotRowView: View {
     
     private func showRenamePrompt() {
         #if os(macOS)
-        guard let window = popoverWindowProvider.window else { return }
         let alert = NSAlert()
         alert.messageText = "Rename Snapshot"
         alert.informativeText = "Set an optional display name for this snapshot."
@@ -628,7 +685,7 @@ struct SnapshotRowView: View {
         textField.stringValue = effectiveName
         alert.accessoryView = textField
 
-        alert.beginSheetModal(for: window) { response in
+        presentSimmerAlert(alert, window: popoverWindowProvider.window) { response in
             if response == .alertFirstButtonReturn {
                 simulatorService.renameSnapshotDisplayName(snapshot, to: textField.stringValue)
             }
@@ -637,7 +694,6 @@ struct SnapshotRowView: View {
     }
 
     private func showRestoreConfirmation() {
-        guard let window = popoverWindowProvider.window else { return }
         let alert = NSAlert()
         alert.messageText = "Restore Snapshot"
         let dateFormatter = DateFormatter()
@@ -648,11 +704,11 @@ struct SnapshotRowView: View {
         alert.addButton(withTitle: "Restore")
         alert.addButton(withTitle: "Cancel")
         #if os(macOS)
-        if let iconPath = displayApp.iconPath, let image = NSImage(contentsOfFile: iconPath) {
+        if let image = simmerAppIcon(from: displayApp.iconPath) {
             alert.icon = maskedAppIcon(from: image, cornerRadius: 16)
         }
         #endif
-        alert.beginSheetModal(for: window) { response in
+        presentSimmerAlert(alert, window: popoverWindowProvider.window) { response in
             if response == .alertFirstButtonReturn {
                 simulatorService.restoreSnapshot(snapshot, for: displayApp)
             }
@@ -685,6 +741,7 @@ struct VisualEffectView: NSViewRepresentable {
 
 #Preview {
     ContentView(appState: AppState(), simulatorService: SimulatorService())
+        .environmentObject(PopoverWindowProvider())
 }
 
 // MARK: - Push Compose Sheet
@@ -697,6 +754,7 @@ struct PushComposeSheet: View {
     @Binding var descriptionText: String
     let onCancel: () -> Void
     let onSend: () -> Void
+    let errorText: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -759,6 +817,13 @@ struct PushComposeSheet: View {
 
             MonospaceTextView(text: $payloadText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !errorText.isEmpty {
+                Text(errorText)
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack {
                 Spacer()

@@ -15,7 +15,11 @@ class SimulatorService: ObservableObject {
     // MARK: - Mock Data Configuration
     private var useMockData: Bool {
         get {
+            #if DEBUG
             return UserDefaults.standard.bool(forKey: "UseMockData")
+            #else
+            return false
+            #endif
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "UseMockData")
@@ -53,6 +57,9 @@ class SimulatorService: ObservableObject {
     private let simulatorPath = "~/Library/Developer/CoreSimulator/Devices"
     private let expandedSimulatorPath = NSString(string: "~/Library/Developer/CoreSimulator/Devices").expandingTildeInPath
     private let pinnedSimulatorsKey = "PinnedSimulators"
+    private var snapshotLoadGeneration = 0
+    private var snapshotsSizeGeneration = 0
+    private let criticalOperationReason = "Simmer snapshot operation"
     
     init() {
         loadSimulators()
@@ -152,6 +159,11 @@ class SimulatorService: ObservableObject {
             return
         }
 
+        guard simulatorIsBooted(at: simulator.dataPath) else {
+            completion?(false, "\(simulator.name) is not booted. Boot it in Simulator and try again.")
+            return
+        }
+
         // Write to temp .apns file
         let tempDir = NSTemporaryDirectory()
         let filePath = (tempDir as NSString).appendingPathComponent("simmer-\(UUID().uuidString).apns")
@@ -245,12 +257,18 @@ class SimulatorService: ObservableObject {
     
     private func sortSimulators(_ simulators: [Simulator]) -> [Simulator] {
         return simulators.sorted { first, second in
-            if first.isPinned && !second.isPinned {
+            if first.isPinned != second.isPinned {
+                return first.isPinned
+            }
+            switch (first.lastBootedAt, second.lastBootedAt) {
+            case let (lhs?, rhs?) where lhs != rhs:
+                return lhs > rhs
+            case (_?, nil):
                 return true
-            } else if !first.isPinned && second.isPinned {
+            case (nil, _?):
                 return false
-            } else {
-                return first.name < second.name
+            default:
+                return first.name.localizedCaseInsensitiveCompare(second.name) == .orderedAscending
             }
         }
     }
@@ -264,46 +282,78 @@ class SimulatorService: ObservableObject {
     }
     
     private func savePinnedState() {
+        // Mock simulators use fake ids. Persisting them would erase real pins.
+        guard !useMockData else { return }
         let pinnedIds = simulators.filter { $0.isPinned }.map { $0.id }
         UserDefaults.standard.set(pinnedIds, forKey: pinnedSimulatorsKey)
     }
     
     func loadApps(for simulator: Simulator) {
+        let previousSimulatorId = selectedSimulator?.id
+        let previousBundleId = selectedApp?.bundleIdentifier
         if useMockData {
             apps = getMockApps(for: simulator)
         } else {
             apps = getApps(for: simulator)
         }
         selectedSimulator = simulator
+        if previousSimulatorId != nil && previousSimulatorId != simulator.id {
+            selectedApp = nil
+            snapshots = []
+            clearSnapshotSize()
+        } else if let previousBundleId,
+                  let updated = apps.first(where: { $0.bundleIdentifier == previousBundleId }) {
+            selectedApp = updated
+        } else if previousBundleId != nil {
+            selectedApp = nil
+            snapshots = []
+            clearSnapshotSize()
+        }
     }
     
     func loadSnapshots(for app: App) {
+        snapshotLoadGeneration += 1
         if useMockData {
+            snapshotsSizeGeneration += 1
             snapshots = getMockSnapshots(for: app)
             totalSnapshotsSize = snapshots.reduce(0) { $0 + $1.size }
+            isLoadingTotalSnapshotsSize = false
         } else {
-            snapshots = getSnapshots(for: app)
-            
-            // Calculate total snapshots size if there are snapshots
-            if !snapshots.isEmpty {
-                calculateTotalSnapshotsSize()
+            let generation = snapshotLoadGeneration
+            snapshots = getSnapshots(for: app, generation: generation)
+            if snapshots.isEmpty {
+                clearSnapshotSize()
+            } else {
+                calculateTotalSnapshotsSize(at: app.snapshotsPath)
             }
             
             // Always refresh documents size for the expanded app to keep sizes accurate
             if let appIndex = apps.firstIndex(where: { $0.id == app.id }) {
                 if !apps[appIndex].documentsPath.isEmpty {
+                    let measuredPath = apps[appIndex].documentsPath
+                    let measuredId = apps[appIndex].id
                     apps[appIndex].startLoadingDocumentsSize()
                     calculateDocumentsSize(for: apps[appIndex]) { calculatedSize in
                         DispatchQueue.main.async {
-                            if let updatedAppIndex = self.apps.firstIndex(where: { $0.id == app.id }) {
-                                self.apps[updatedAppIndex].finishLoadingDocumentsSize(calculatedSize)
-                            }
+                            self.applyDocumentsSize(calculatedSize, appId: measuredId, documentsPath: measuredPath)
                         }
                     }
                 }
             }
         }
         selectedApp = app
+    }
+
+    private func clearSnapshotSize() {
+        snapshotsSizeGeneration += 1
+        totalSnapshotsSize = 0
+        isLoadingTotalSnapshotsSize = false
+    }
+
+    private func applyDocumentsSize(_ calculatedSize: Int64, appId: String, documentsPath: String) {
+        guard let appIndex = apps.firstIndex(where: { $0.id == appId }) else { return }
+        guard apps[appIndex].documentsPath == documentsPath else { return }
+        apps[appIndex].finishLoadingDocumentsSize(calculatedSize)
     }
     
     private func getAvailableSimulators() -> [Simulator] {
@@ -317,17 +367,22 @@ class SimulatorService: ObservableObject {
                 let devicePlistPath = "\(devicePath)/device.plist"
                 
                 if let deviceData = NSDictionary(contentsOfFile: devicePlistPath) {
+                    if deviceRecordIsDeleted(deviceData) {
+                        continue
+                    }
                     let name = deviceData["name"] as? String ?? "Unknown"
                     let runtime = deviceData["runtime"] as? String ?? "Unknown"
                     let deviceType = deviceData["deviceType"] as? String ?? "iPhone"
+                    let lastBootedAt = deviceData["lastBootedAt"] as? Date
                     
                     let simulator = Simulator(
                         id: deviceDir,
                         name: name,
                         iOSVersion: runtime.replacingOccurrences(of: "com.apple.CoreSimulator.SimRuntime.", with: ""),
-                        deviceType: getDeviceType(from: deviceType),
+                        deviceType: Simulator.DeviceType.resolve(deviceType),
                         udid: deviceDir,
-                        dataPath: devicePath
+                        dataPath: devicePath,
+                        lastBootedAt: lastBootedAt
                     )
                     
                     // Only include simulators that have apps installed
@@ -363,19 +418,6 @@ class SimulatorService: ObservableObject {
         } catch {
             return false
         }
-    }
-    
-    private func getDeviceType(from deviceTypeString: String) -> Simulator.DeviceType {
-        if deviceTypeString.contains("iPhone") {
-            return .iPhone
-        } else if deviceTypeString.contains("iPad") {
-            return .iPad
-        } else if deviceTypeString.contains("AppleTV") {
-            return .appleTV
-        } else if deviceTypeString.contains("Watch") {
-            return .appleWatch
-        }
-        return .iPhone
     }
     
     private func getApps(for simulator: Simulator) -> [App] {
@@ -460,11 +502,11 @@ class SimulatorService: ObservableObject {
                                 // Start loading documents size in background
                                 if !documentsPath.isEmpty {
                                     app.startLoadingDocumentsSize()
+                                    let measuredPath = documentsPath
+                                    let measuredId = bundleDir
                                     calculateDocumentsSize(for: app) { calculatedSize in
                                         DispatchQueue.main.async {
-                                            if let appIndex = self.apps.firstIndex(where: { $0.id == app.id }) {
-                                                self.apps[appIndex].finishLoadingDocumentsSize(calculatedSize)
-                                            }
+                                            self.applyDocumentsSize(calculatedSize, appId: measuredId, documentsPath: measuredPath)
                                         }
                                     }
                                 }
@@ -611,16 +653,8 @@ class SimulatorService: ObservableObject {
                                     }
                                 }
                                 
-                                log("No icon files found for bundle: \(bundleIdentifier)")
-                                
-                                // Final fallback: try to get icon from system app store
-                                let systemIconPath = self.getSystemAppIcon(for: bundleIdentifier)
-                                if let systemIconPath = systemIconPath {
-                                                                    log("Found system app icon: \(systemIconPath)")
-                                return systemIconPath
-                                }
-                                
-                                return nil
+                                log("No loose icon file for \(bundleIdentifier); using the app bundle icon")
+                                return appBundlePath
                             }
                         } else {
                             log("Could not read Info.plist at: \(infoPlistPath)")
@@ -653,66 +687,7 @@ class SimulatorService: ObservableObject {
         }
     }
     
-    private func getSystemAppIcon(for bundleIdentifier: String) -> String? {
-        // Try to find the app in the system Applications folder
-        let systemAppPaths = [
-            "/Applications",
-            "/System/Applications",
-            "/System/Applications/Utilities"
-        ]
-        
-        for appPath in systemAppPaths {
-            do {
-                let appContents = try FileManager.default.contentsOfDirectory(atPath: appPath)
-                for appName in appContents {
-                    // Skip system files like .DS_Store
-                    if appName.hasPrefix(".") {
-                        continue
-                    }
-                    
-                    if appName.hasSuffix(".app") {
-                        let fullAppPath = "\(appPath)/\(appName)"
-                        let infoPlistPath = "\(fullAppPath)/Contents/Info.plist"
-                        
-                        if FileManager.default.fileExists(atPath: infoPlistPath),
-                           let infoPlist = NSDictionary(contentsOfFile: infoPlistPath) {
-                            let bundleId = infoPlist["CFBundleIdentifier"] as? String
-                            if bundleId == bundleIdentifier {
-                                // Try to find icon in the app bundle
-                                let iconPath = "\(fullAppPath)/Contents/Resources/AppIcon.icns"
-                                if FileManager.default.fileExists(atPath: iconPath) {
-                                    return iconPath
-                                }
-                                
-                                // Try other common icon locations
-                                let resourcePath = "\(fullAppPath)/Contents/Resources"
-                                if let resourceContents = try? FileManager.default.contentsOfDirectory(atPath: resourcePath) {
-                                    for file in resourceContents {
-                                        // Skip system files like .DS_Store
-                                        if file.hasPrefix(".") {
-                                            continue
-                                        }
-                                        
-                                        if file.hasSuffix(".icns") || (file.hasSuffix(".png") && file.contains("Icon")) {
-                                            let iconPath = "\(resourcePath)/\(file)"
-                                            return iconPath
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch {
-                // Continue to next path
-                continue
-            }
-        }
-        
-        return nil
-    }
-    
-    private func getSnapshots(for app: App) -> [Snapshot] {
+    private func getSnapshots(for app: App, generation: Int) -> [Snapshot] {
         var snapshots: [Snapshot] = []
         
         // Check if snapshots directory exists
@@ -774,7 +749,7 @@ class SimulatorService: ObservableObject {
         for (_, snapshot) in sortedSnapshots.enumerated() {
             calculateSnapshotSize(for: snapshot) { calculatedSize in
                 DispatchQueue.main.async {
-                    // Find the snapshot by ID to update the correct one
+                    guard generation == self.snapshotLoadGeneration else { return }
                     if let snapshotIndex = self.snapshots.firstIndex(where: { $0.id == snapshot.id }) {
                         self.snapshots[snapshotIndex].finishLoadingSize(calculatedSize)
                     }
@@ -788,7 +763,7 @@ class SimulatorService: ObservableObject {
     // MARK: - Snapshot Metadata (Rename)
     func renameSnapshotDisplayName(_ snapshot: Snapshot, to newName: String?) {
         // Must have selected app context to ensure paths remain valid/fresh
-        guard let app = selectedApp else { return }
+        guard let selected = selectedApp, let app = liveApp(selected) else { return }
         // Find current snapshot (by id) to get latest path
         loadSnapshots(for: app)
         guard let currentIndex = snapshots.firstIndex(where: { $0.id == snapshot.id }) else { return }
@@ -829,82 +804,36 @@ class SimulatorService: ObservableObject {
     }
     
     private func calculateSnapshotSize(for snapshot: Snapshot, completion: @escaping (Int64) -> Void) {
+        let path = snapshot.path
         DispatchQueue.global(qos: .userInitiated).async {
-            var totalSize: Int64 = 0
-            
-            do {
-                let enumerator = FileManager.default.enumerator(atPath: snapshot.path)
-                while let file = enumerator?.nextObject() as? String {
-                    let filePath = "\(snapshot.path)/\(file)"
-                    let fileAttributes = try FileManager.default.attributesOfItem(atPath: filePath)
-                    totalSize += fileAttributes[.size] as? Int64 ?? 0
-                }
-            } catch {
-                self.log("Error calculating snapshot size for \(snapshot.name): \(error)", type: .error)
-            }
-            
-            completion(totalSize)
+            completion(directoryByteSize(at: path))
         }
     }
     
     private func calculateDocumentsSize(for app: App, completion: @escaping (Int64) -> Void) {
+        let path = app.documentsPath
         DispatchQueue.global(qos: .userInitiated).async {
-            var totalSize: Int64 = 0
-            
-            do {
-                let enumerator = FileManager.default.enumerator(atPath: app.documentsPath)
-                while let file = enumerator?.nextObject() as? String {
-                    let filePath = "\(app.documentsPath)/\(file)"
-                    let fileAttributes = try FileManager.default.attributesOfItem(atPath: filePath)
-                    totalSize += fileAttributes[.size] as? Int64 ?? 0
-                }
-            } catch {
-                self.log("Error calculating documents size for \(app.name): \(error)", type: .error)
-            }
-            
-            completion(totalSize)
+            completion(directoryByteSize(at: path))
         }
     }
-    
-
     
     func getDirectorySize(for path: String) -> DirectorySize {
-        var totalSize: Int64 = 0
-        
-        do {
-            let enumerator = FileManager.default.enumerator(atPath: path)
-            while let file = enumerator?.nextObject() as? String {
-                let filePath = "\(path)/\(file)"
-                let attributes = try FileManager.default.attributesOfItem(atPath: filePath)
-                totalSize += attributes[.size] as? Int64 ?? 0
-            }
-        } catch {
-            log("Error calculating directory size: \(error)", type: .error)
-        }
-        
-        return DirectorySize(size: totalSize)
+        DirectorySize(size: directoryByteSize(at: path))
     }
     
-    func calculateTotalSnapshotsSize() {
+    func calculateTotalSnapshotsSize(at snapshotsPath: String) {
+        snapshotsSizeGeneration += 1
+        let generation = snapshotsSizeGeneration
+        guard !snapshotsPath.isEmpty else {
+            totalSnapshotsSize = 0
+            isLoadingTotalSnapshotsSize = false
+            return
+        }
         isLoadingTotalSnapshotsSize = true
-        
         DispatchQueue.global(qos: .userInitiated).async {
-            var totalSize: Int64 = 0
-            
-            for app in self.apps {
-                do {
-                    let enumerator = FileManager.default.enumerator(atPath: app.snapshotsPath)
-                    while let file = enumerator?.nextObject() as? String {
-                        let filePath = "\(app.snapshotsPath)/\(file)"
-                        let attributes = try FileManager.default.attributesOfItem(atPath: filePath)
-                        totalSize += attributes[.size] as? Int64 ?? 0
-                    }
-                } catch {
-                    self.log("Error calculating snapshots size: \(error)", type: .error)
-                }
-            }
-            
+            let totalSize = directoryByteSize(at: snapshotsPath)
             DispatchQueue.main.async {
+                guard generation == self.snapshotsSizeGeneration else { return }
                 self.totalSnapshotsSize = totalSize
                 self.isLoadingTotalSnapshotsSize = false
             }
@@ -915,116 +844,104 @@ class SimulatorService: ObservableObject {
         return DirectorySize(size: totalSnapshotsSize)
     }
     
-    // MARK: - Path Validation and Refresh
-    
-    private func validateAppPaths(_ app: App) -> Bool {
-        let documentsExists = FileManager.default.fileExists(atPath: app.documentsPath)
-        let snapshotsExists = FileManager.default.fileExists(atPath: app.snapshotsPath)
-        
-        log("Validating paths for \(app.name):")
-        log("Documents path: \(app.documentsPath) - exists: \(documentsExists)")
-        log("Snapshots path: \(app.snapshotsPath) - exists: \(snapshotsExists)")
-        
-        return documentsExists && snapshotsExists
-    }
-    
-    private func refreshSimulatorDataIfNeeded(for app: App) -> Bool {
-        // If paths are valid, no refresh needed
-        if validateAppPaths(app) {
-            log("Paths are valid for \(app.name), no refresh needed")
-            return true
-        }
-        
-        log("Paths are invalid for \(app.name), refreshing simulator data...")
-        
-        // Refresh the current simulators data
-        if let selectedSimulator = selectedSimulator {
-            log("Refreshing data for simulator: \(selectedSimulator.name)")
-            
-            // Reload apps for the current simulator
-            loadApps(for: selectedSimulator)
-            
-            // Try to find the updated app
-            if let updatedApp = apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-                log("Found updated app: \(updatedApp.name)")
-                
-                // Update the selected app if it's the same one
-                if selectedApp?.bundleIdentifier == app.bundleIdentifier {
-                    selectedApp = updatedApp
-                    log("Updated selected app to: \(updatedApp.name)")
-                }
-                
-                // Validate the updated app's paths
-                if validateAppPaths(updatedApp) {
-                    log("Updated app paths are valid")
-                    return true
-                } else {
-                    log("Updated app paths are still invalid", type: .error)
-                    return false
-                }
-            } else {
-                log("Could not find updated app for bundle identifier: \(app.bundleIdentifier)", type: .error)
-                return false
-            }
-        } else {
-            log("No selected simulator to refresh", type: .error)
+    // MARK: - Live container lookup
+
+    /// True when `documentsPath` still sits in the data container CoreSimulator
+    /// currently assigns to this bundle id. A reinstall mints a new UUID, and
+    /// the old path must not be recreated.
+    private func isLiveDataContainer(_ app: App) -> Bool {
+        guard !app.documentsPath.isEmpty, !app.bundleIdentifier.isEmpty else { return false }
+        let container = (app.documentsPath as NSString).deletingLastPathComponent
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: container, isDirectory: &isDir), isDir.boolValue else {
             return false
         }
-    }
-    
-    private func getValidatedApp(_ app: App) -> App? {
-        // First try to validate the current app
-        if validateAppPaths(app) {
-            return app
+        let metadataPath = (container as NSString).appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+        guard let metadata = NSDictionary(contentsOfFile: metadataPath),
+              let identifier = metadata["MCMMetadataIdentifier"] as? String else {
+            return false
         }
-        
-        // If validation fails, try to refresh and get the updated app
-        if refreshSimulatorDataIfNeeded(for: app) {
-            // Return the updated app from the refreshed data
-            return apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier })
-        }
-        
-        return nil
+        return identifier == app.bundleIdentifier
     }
 
-    // Returns an app whose Documents path exists, refreshing simulator data if needed.
-    // Does not require the Snapshots directory to exist.
-    private func getAppWithValidDocuments(_ app: App) -> App? {
-        // If documents exists, we're good
-        if FileManager.default.fileExists(atPath: app.documentsPath) {
+    /// Returns the app record whose data container matches the bundle id now.
+    /// Does not require a Snapshots directory; that folder is created on first capture.
+    private func liveApp(_ app: App) -> App? {
+        if isLiveDataContainer(app) {
             return app
         }
-        // Try to refresh and get updated app
-        if refreshSimulatorDataIfNeeded(for: app) {
-            if let updatedApp = apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-                if FileManager.default.fileExists(atPath: updatedApp.documentsPath) {
-                    return updatedApp
-                }
-            }
+        guard let simulator = selectedSimulator else { return nil }
+        loadApps(for: simulator)
+        guard let updated = apps.first(where: { $0.bundleIdentifier == app.bundleIdentifier }),
+              isLiveDataContainer(updated) else {
+            return nil
         }
-        return nil
+        return updated
+    }
+
+    private func beginCriticalFileOperation() {
+        ProcessInfo.processInfo.disableSuddenTermination()
+        ProcessInfo.processInfo.disableAutomaticTermination(criticalOperationReason)
+    }
+
+    private func endCriticalFileOperation() {
+        ProcessInfo.processInfo.enableAutomaticTermination(criticalOperationReason)
+        ProcessInfo.processInfo.enableSuddenTermination()
+    }
+
+    private func terminateRunningApp(_ app: App, on simulator: Simulator) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "terminate", simulator.udid, app.bundleIdentifier]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            log("Could not terminate \(app.bundleIdentifier): \(error)")
+        }
+    }
+
+    private func reportSnapshotFailure(_ message: String) {
+        isSnapshotOperationInProgress = true
+        snapshotOperationProgress = 1
+        snapshotOperationMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            self.isSnapshotOperationInProgress = false
+            self.snapshotOperationProgress = 0
+            self.snapshotOperationMessage = ""
+        }
     }
     
     // MARK: - Updated Functions with Path Validation
     
-    func openDocumentsFolder(for app: App) {
-        // Only require a valid Documents path; Snapshots is irrelevant for opening
-        guard !app.documentsPath.isEmpty else {
-            log("Documents path is empty for \(app.name); cannot open", type: .error)
-            return
+    /// Opens the live Documents directory. Returns an error message when the
+    /// current container cannot be resolved. Never recreates a stale UUID.
+    func openDocumentsFolder(for app: App) -> String? {
+        guard let current = liveApp(app) else {
+            let message = "Couldn't find the current Documents folder for \(app.name). Reopen this simulator and try again."
+            log(message, type: .error)
+            return message
         }
 
-        let documentsPath = app.documentsPath
-
-        // Ensure the Documents directory exists; create if missing
+        let documentsPath = current.documentsPath
+        let parent = (documentsPath as NSString).deletingLastPathComponent
         var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory), isDirectory.boolValue else {
+            let message = "Couldn't find the app container for \(app.name)."
+            log(message, type: .error)
+            return message
+        }
+
         if !FileManager.default.fileExists(atPath: documentsPath, isDirectory: &isDirectory) || !isDirectory.boolValue {
             do {
-                try FileManager.default.createDirectory(atPath: documentsPath, withIntermediateDirectories: true)
-                log("Created Documents directory for \(app.name) at \(documentsPath)")
+                try FileManager.default.createDirectory(atPath: documentsPath, withIntermediateDirectories: false)
+                log("Created Documents directory for \(current.name) at \(documentsPath)")
             } catch {
-                log("Failed to create Documents directory at \(documentsPath): \(error)", type: .error)
-                return
+                let message = "Couldn't create the Documents folder for \(current.name)."
+                log("\(message) \(error)", type: .error)
+                return message
             }
         }
 
@@ -1045,150 +962,77 @@ class SimulatorService: ObservableObject {
             }
 
             if let fileURL = selectedFileURL {
-                log("Revealing first file in Documents for \(app.name): \(fileURL.path)")
+                log("Revealing first file in Documents for \(current.name): \(fileURL.path)")
                 NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-                return
+                return nil
             }
         } catch {
             log("Failed to enumerate Documents at \(documentsPath): \(error)", type: .error)
         }
 
         let url = URL(fileURLWithPath: documentsPath, isDirectory: true)
-        log("Opening documents folder for \(app.name) at \(documentsPath)")
+        log("Opening documents folder for \(current.name) at \(documentsPath)")
         NSWorkspace.shared.open(url)
+        return nil
     }
     
     func takeSnapshot(for app: App) {
-        // Only require a valid Documents directory. Snapshots directory will be created if needed.
-        guard let validatedApp = getAppWithValidDocuments(app) else {
-            log("Documents path invalid for \(app.name), cannot take snapshot", type: .error)
+        guard !isSnapshotOperationInProgress else { return }
+        guard let validatedApp = liveApp(app) else {
+            log("Documents container invalid for \(app.name), cannot take snapshot", type: .error)
+            reportSnapshotFailure("Couldn't find this app's container, so no snapshot was taken.")
             return
         }
-        
+        guard !validatedApp.snapshotsPath.isEmpty else {
+            reportSnapshotFailure("Couldn't find a place to store snapshots for \(validatedApp.name).")
+            return
+        }
+        guard FileManager.default.fileExists(atPath: validatedApp.documentsPath) else {
+            reportSnapshotFailure("Documents directory does not exist")
+            return
+        }
+
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let snapshotName = "snapshot_\(timestamp)"
-        let snapshotPath = "\(validatedApp.snapshotsPath)/\(snapshotName)"
-        
-        log("Taking snapshot for \(validatedApp.name)")
-        log("Documents path: \(validatedApp.documentsPath)")
-        log("Snapshots path: \(validatedApp.snapshotsPath)")
-        log("Snapshot path: \(snapshotPath)")
-        
-        // Start progress tracking
-        DispatchQueue.main.async {
-            self.isSnapshotOperationInProgress = true
-            self.snapshotOperationProgress = 0.0
-            self.snapshotOperationMessage = "Preparing snapshot..."
-        }
-        
+        let snapshotPath = (validatedApp.snapshotsPath as NSString).appendingPathComponent(snapshotName)
+
+        log("Taking snapshot for \(validatedApp.name) at \(snapshotPath)")
+        isSnapshotOperationInProgress = true
+        snapshotOperationProgress = 0
+        snapshotOperationMessage = "Preparing snapshot..."
+        beginCriticalFileOperation()
+
         DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                DispatchQueue.main.async { self.endCriticalFileOperation() }
+            }
             do {
-                // Check if Documents directory exists
-                let documentsExists = FileManager.default.fileExists(atPath: validatedApp.documentsPath)
-                self.log("Documents directory exists: \(documentsExists)")
-                
-                if documentsExists {
-                    DispatchQueue.main.async {
-                        self.snapshotOperationProgress = 0.2
-                        self.snapshotOperationMessage = "Creating directories..."
-                    }
-                    
-                    // Create Snapshots directory if it doesn't exist
-                    let snapshotsExists = FileManager.default.fileExists(atPath: validatedApp.snapshotsPath)
-                    self.log("Snapshots directory exists: \(snapshotsExists)")
-                    
-                    if !snapshotsExists {
-                        try FileManager.default.createDirectory(atPath: validatedApp.snapshotsPath, withIntermediateDirectories: true)
-                        self.log("Created snapshots directory")
-                    }
-                    
-                    // Create the snapshot directory first
-                    try FileManager.default.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
-                    self.log("Created snapshot directory: \(snapshotPath)")
-                    
-                    DispatchQueue.main.async {
-                        self.snapshotOperationProgress = 0.4
-                        self.snapshotOperationMessage = "Copying documents..."
-                    }
-                    
-                    // Copy the Documents directory itself to the snapshot
-                    let documentsDestinationPath = "\(snapshotPath)/Documents"
-                    try FileManager.default.copyItem(atPath: validatedApp.documentsPath, toPath: documentsDestinationPath)
-
-                    // Validate the snapshot integrity against the source Documents
-                    DispatchQueue.main.async {
-                        self.snapshotOperationProgress = 0.6
-                        self.snapshotOperationMessage = "Validating snapshot..."
-                    }
-
-                    let isValid = self.validateSnapshot(sourcePath: validatedApp.documentsPath, snapshotDocumentsPath: documentsDestinationPath)
-
-                    if isValid {
-                        DispatchQueue.main.async {
-                            self.snapshotOperationProgress = 0.8
-                            self.snapshotOperationMessage = "Finalizing snapshot..."
-                        }
-
-                        DispatchQueue.main.async {
-                            self.loadSnapshots(for: validatedApp)
-                            self.isSnapshotOperationInProgress = false
-                            self.snapshotOperationProgress = 1.0
-                            self.snapshotOperationMessage = "Snapshot created successfully!"
-                            
-                            // Reset progress after a short delay
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                self.snapshotOperationProgress = 0.0
-                                self.snapshotOperationMessage = ""
-                            }
-                        }
-                        
-                        self.log("Snapshot created successfully: \(snapshotName)")
-                    } else {
-                        // Clean up the incomplete snapshot folder
-                        do {
-                            try FileManager.default.removeItem(atPath: snapshotPath)
-                            self.log("Removed incomplete snapshot at: \(snapshotPath)")
-                        } catch {
-                            self.log("Failed to remove incomplete snapshot at \(snapshotPath): \(error)", type: .error)
-                        }
-
-                        // Surface a clear error message to the user and keep the HUD visible briefly
-                        DispatchQueue.main.async {
-                            self.snapshotOperationProgress = 1.0
-                            self.snapshotOperationMessage = "Snapshot failed: Some files could not be copied. Close the app using these files and try again."
-                            
-                            // Hide after a delay
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-                                self.isSnapshotOperationInProgress = false
-                                self.snapshotOperationProgress = 0.0
-                                self.snapshotOperationMessage = ""
-                            }
-                        }
-
-                        self.log("Snapshot validation failed for \(validatedApp.name). Likely due to files in use during copy.", type: .error)
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.isSnapshotOperationInProgress = false
-                        self.snapshotOperationMessage = "Documents directory does not exist"
-                        
-                        // Reset progress after a short delay
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                            self.snapshotOperationProgress = 0.0
-                            self.snapshotOperationMessage = ""
-                        }
-                    }
-                    self.log("Documents directory does not exist for \(validatedApp.name)")
+                if !FileManager.default.fileExists(atPath: validatedApp.snapshotsPath) {
+                    try FileManager.default.createDirectory(atPath: validatedApp.snapshotsPath, withIntermediateDirectories: true)
                 }
+                DispatchQueue.main.async {
+                    self.snapshotOperationProgress = 0.4
+                    self.snapshotOperationMessage = "Copying documents..."
+                }
+                try captureDocumentsSnapshot(documentsPath: validatedApp.documentsPath, snapshotPath: snapshotPath)
+                DispatchQueue.main.async {
+                    self.loadSnapshots(for: validatedApp)
+                    self.snapshotOperationProgress = 1
+                    self.snapshotOperationMessage = "Snapshot created successfully!"
+                    self.isSnapshotOperationInProgress = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        self.snapshotOperationProgress = 0
+                        self.snapshotOperationMessage = ""
+                    }
+                }
+                self.log("Snapshot created successfully: \(snapshotName)")
             } catch {
                 DispatchQueue.main.async {
-                    // Keep HUD visible to show the error, then hide
-                    self.snapshotOperationProgress = 1.0
-                    self.snapshotOperationMessage = "Error taking snapshot: \(error.localizedDescription)"
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    self.snapshotOperationProgress = 1
+                    self.snapshotOperationMessage = "Snapshot failed: \(error.localizedDescription). Close the app if it has these files open, then try again."
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                         self.isSnapshotOperationInProgress = false
-                        self.snapshotOperationProgress = 0.0
+                        self.snapshotOperationProgress = 0
                         self.snapshotOperationMessage = ""
                     }
                 }
@@ -1197,276 +1041,109 @@ class SimulatorService: ObservableObject {
         }
     }
 
-    // Validates that the snapshot at snapshotDocumentsPath matches the source at sourcePath
-    // by comparing recursive file lists, relative paths, and sizes.
-    private func validateSnapshot(sourcePath: String, snapshotDocumentsPath: String) -> Bool {
-        // Ensure both directories exist
-        guard FileManager.default.fileExists(atPath: sourcePath), FileManager.default.fileExists(atPath: snapshotDocumentsPath) else {
-            self.log("Snapshot validation failed: One or both directories don't exist", type: .error)
-            return false
-        }
-
-        do {
-            let sourceFiles = try getAllFilesRecursively(at: sourcePath)
-            let snapshotFiles = try getAllFilesRecursively(at: snapshotDocumentsPath)
-
-            if sourceFiles.count != snapshotFiles.count {
-                self.log("Snapshot validation failed: File count mismatch. Source: \(sourceFiles.count), Snapshot: \(snapshotFiles.count)", type: .error)
-                return false
-            }
-
-            for (index, sourceFile) in sourceFiles.enumerated() {
-                let copiedFile = snapshotFiles[index]
-
-                if sourceFile.relativePath != copiedFile.relativePath {
-                    self.log("Snapshot validation failed: File path mismatch at index \(index)", type: .error)
-                    return false
-                }
-
-                if sourceFile.size != copiedFile.size {
-                    self.log("Snapshot validation failed: Size mismatch for \(sourceFile.relativePath). Source: \(sourceFile.size), Snapshot: \(copiedFile.size)", type: .error)
-                    return false
-                }
-            }
-
-            self.log("Snapshot validation successful: All \(sourceFiles.count) files copied correctly")
-            return true
-        } catch {
-            self.log("Snapshot validation failed with error: \(error)", type: .error)
-            return false
-        }
-    }
-    
     func restoreSnapshot(_ snapshot: Snapshot, for app: App) {
-        guard let validatedApp = getValidatedApp(app) else {
-            log("Could not validate paths for \(app.name), cannot restore snapshot", type: .error)
+        guard !isSnapshotOperationInProgress else { return }
+        guard let validatedApp = liveApp(app) else {
+            reportSnapshotFailure("Couldn't find this app's container, so nothing was changed.")
             return
         }
-        
-        // Start progress tracking
-        DispatchQueue.main.async {
-            self.isSnapshotOperationInProgress = true
-            self.snapshotOperationProgress = 0.0
-            self.snapshotOperationMessage = "Preparing to restore snapshot..."
+        guard let simulator = selectedSimulator else { return }
+        guard isSafeSnapshotPath(snapshot.path, for: validatedApp) else {
+            reportSnapshotFailure("This snapshot is not in the current app container, so nothing was changed.")
+            return
         }
-        
+        let snapshotDocumentsPath = (snapshot.path as NSString).appendingPathComponent("Documents")
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: snapshotDocumentsPath, isDirectory: &isDir), isDir.boolValue else {
+            reportSnapshotFailure("This snapshot has no Documents folder, so nothing was changed.")
+            return
+        }
+
+        isSnapshotOperationInProgress = true
+        snapshotOperationProgress = 0
+        snapshotOperationMessage = "Preparing to restore snapshot..."
+        beginCriticalFileOperation()
+
         DispatchQueue.global(qos: .userInitiated).async {
-            self.performRestoreWithRetry(snapshot: snapshot, app: validatedApp, attempt: 1)
+            defer {
+                DispatchQueue.main.async { self.endCriticalFileOperation() }
+            }
+            self.terminateRunningApp(validatedApp, on: simulator)
+            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: validatedApp, simulator: simulator, attempt: 1)
         }
     }
-    
-    private func performRestoreWithRetry(snapshot: Snapshot, app: App, attempt: Int) {
+
+    private func performRestore(snapshotDocumentsPath: String, app: App, simulator: Simulator, attempt: Int) {
+        DispatchQueue.main.async {
+            self.snapshotOperationProgress = 0.4
+            self.snapshotOperationMessage = attempt == 1 ? "Restoring snapshot..." : "Validation failed, retrying restore..."
+        }
         do {
+            try restoreDocumentsReplacingLiveCopy(
+                snapshotDocumentsPath: snapshotDocumentsPath,
+                documentsPath: app.documentsPath,
+                simulatorRoot: simulator.dataPath
+            )
             DispatchQueue.main.async {
-                self.snapshotOperationProgress = 0.2
-                self.snapshotOperationMessage = "Removing current documents..."
-            }
-            
-            // Remove current documents
-            try FileManager.default.removeItem(atPath: app.documentsPath)
-            
-            DispatchQueue.main.async {
-                self.snapshotOperationProgress = 0.5
-                self.snapshotOperationMessage = "Restoring snapshot documents..."
-            }
-            
-            // Copy the Documents directory from the snapshot to the apps documents path
-            let snapshotDocumentsPath = "\(snapshot.path)/Documents"
-            try FileManager.default.copyItem(atPath: snapshotDocumentsPath, toPath: app.documentsPath)
-            
-            DispatchQueue.main.async {
-                self.snapshotOperationProgress = 0.8
-                self.snapshotOperationMessage = "Waiting for file system to complete..."
-            }
-            
-            // Wait 0.5ds for file system actions to complete
-            Thread.sleep(forTimeInterval: 0.5)
-            DispatchQueue.main.async {
-                self.snapshotOperationProgress = 0.9
-                self.snapshotOperationMessage = "Validating restore..."
-            }
-            
-            // Validate the restore by comparing files
-            let isValid = self.validateRestore(snapshot: snapshot, app: app)
-            
-            if isValid {
-                DispatchQueue.main.async {
-                    self.loadSnapshots(for: app)
-                    self.snapshotOperationProgress = 1.0
-                    self.snapshotOperationMessage = "Snapshot restored successfully!"
-                    self.isSnapshotOperationInProgress = false
-                    
-                    // Reset progress after a short delay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                        self.snapshotOperationProgress = 0.0
-                        self.snapshotOperationMessage = ""
-                    }
-                }
-                self.log("Snapshot restored successfully on attempt \(attempt)")
-            } else {
-                if attempt < 2 {
-                    self.log("Restore validation failed on attempt \(attempt), retrying...")
-                    DispatchQueue.main.async {
-                        self.snapshotOperationProgress = 0.1
-                        self.snapshotOperationMessage = "Validation failed, retrying restore..."
-                    }
-                    
-                    // Wait a bit before retry
-                    Thread.sleep(forTimeInterval: 0.3)
-                    
-                    // Retry the restore
-                    self.performRestoreWithRetry(snapshot: snapshot, app: app, attempt: attempt + 1)
-                } else {
-                    DispatchQueue.main.async {
-                        self.isSnapshotOperationInProgress = false
-                        self.snapshotOperationMessage = "Snapshot restore failed after 2 attempts. Files may be corrupted or incomplete."
-                        
-                        // Reset progress after a longer delay for error
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
-                            self.snapshotOperationProgress = 0.0
-                            self.snapshotOperationMessage = ""
-                        }
-                    }
-                    self.log("Snapshot restore failed after 2 attempts", type: .error)
+                self.loadSnapshots(for: app)
+                self.snapshotOperationProgress = 1
+                self.snapshotOperationMessage = "Snapshot restored successfully!"
+                self.isSnapshotOperationInProgress = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    self.snapshotOperationProgress = 0
+                    self.snapshotOperationMessage = ""
                 }
             }
+            self.log("Snapshot restored successfully on attempt \(attempt)")
+        } catch SnapshotFileFailure.validationFailed where attempt < 2 {
+            self.log("Restore validation failed on attempt \(attempt). Original Documents were kept. Retrying...")
+            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: app, simulator: simulator, attempt: attempt + 1)
         } catch {
             DispatchQueue.main.async {
-                self.isSnapshotOperationInProgress = false
-                self.snapshotOperationMessage = "Error restoring snapshot: \(error.localizedDescription)"
-                
-                // Reset progress after a short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self.snapshotOperationProgress = 0.0
+                self.snapshotOperationProgress = 1
+                self.snapshotOperationMessage = error.localizedDescription
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    self.isSnapshotOperationInProgress = false
+                    self.snapshotOperationProgress = 0
                     self.snapshotOperationMessage = ""
                 }
             }
             self.log("Error restoring snapshot on attempt \(attempt): \(error)", type: .error)
         }
     }
-    
-    private func validateRestore(snapshot: Snapshot, app: App) -> Bool {
-        let snapshotDocumentsPath = "\(snapshot.path)/Documents"
-        let restoredDocumentsPath = app.documentsPath
-        
-        // Check if both directories exist
-        guard FileManager.default.fileExists(atPath: snapshotDocumentsPath),
-              FileManager.default.fileExists(atPath: restoredDocumentsPath) else {
-            self.log("Validation failed: One or both directories don't exist", type: .error)
-            return false
-        }
-        
-        do {
-            // Get all files from both directories recursively
-            let snapshotFiles = try getAllFilesRecursively(at: snapshotDocumentsPath)
-            let restoredFiles = try getAllFilesRecursively(at: restoredDocumentsPath)
-            
-            // Compare file counts
-            if snapshotFiles.count != restoredFiles.count {
-                self.log("Validation failed: File count mismatch. Snapshot: \(snapshotFiles.count), Restored: \(restoredFiles.count)", type: .error)
-                return false
-            }
-            
-            // Compare file sizes and names
-            for (index, snapshotFile) in snapshotFiles.enumerated() {
-                let restoredFile = restoredFiles[index]
-                
-                // Compare relative paths
-                if snapshotFile.relativePath != restoredFile.relativePath {
-                    self.log("Validation failed: File path mismatch at index \(index)", type: .error)
-                    return false
-                }
-                
-                // Compare file sizes
-                if snapshotFile.size != restoredFile.size {
-                    self.log("Validation failed: File size mismatch for \(snapshotFile.relativePath). Snapshot: \(snapshotFile.size), Restored: \(restoredFile.size)", type: .error)
-                    return false
-                }
-            }
-            
-            self.log("Validation successful: All \(snapshotFiles.count) files restored correctly")
-            return true
-            
-        } catch {
-            self.log("Validation failed with error: \(error)", type: .error)
-            return false
-        }
-    }
-    
-    private struct FileInfo {
-        let relativePath: String
-        let size: Int64
-    }
-    
-    private func getAllFilesRecursively(at path: String) throws -> [FileInfo] {
-        var files: [FileInfo] = []
-        let basePath = path
-        
-        func enumerateFiles(at currentPath: String, relativePath: String = "") throws {
-            let contents = try FileManager.default.contentsOfDirectory(atPath: currentPath)
-            
-            for item in contents {
-                let fullPath = "\(currentPath)/\(item)"
-                let itemRelativePath = relativePath.isEmpty ? item : "\(relativePath)/\(item)"
-                
-                var isDirectory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
-                    if isDirectory.boolValue {
-                        // Recursively enumerate subdirectories
-                        try enumerateFiles(at: fullPath, relativePath: itemRelativePath)
-                    } else {
-                        // Add file to our list
-                        let attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
-                        let size = attributes[.size] as? Int64 ?? 0
-                        files.append(FileInfo(relativePath: itemRelativePath, size: size))
-                    }
-                }
-            }
-        }
-        
-        try enumerateFiles(at: basePath)
-        return files.sorted { $0.relativePath < $1.relativePath }
-    }
-    
+
     // MARK: - Path Safety
     
-    // Normalizes a filesystem path for safe comparison by resolving symlinks and standardizing.
     private func normalizedPath(_ path: String) -> String {
-        return URL(fileURLWithPath: path).standardizedFileURL.path
+        standardizedPath(path)
     }
     
-    // Returns true if candidate is the same as or a subpath of base (directory semantics)
     private func isPath(_ candidate: String, underDirectory base: String) -> Bool {
-        let candidateNorm = normalizedPath(candidate)
-        let baseNorm = normalizedPath(base)
-        if candidateNorm == baseNorm { return true }
-        let prefix = baseNorm.hasSuffix("/") ? baseNorm : baseNorm + "/"
-        return candidateNorm.hasPrefix(prefix)
+        pathIsInside(candidate, directory: base)
     }
     
-    // Ensures a snapshot folder lives under the app's Snapshots directory and is not Documents
     private func isSafeSnapshotPath(_ snapshotPath: String, for app: App) -> Bool {
-        guard !app.snapshotsPath.isEmpty, !app.documentsPath.isEmpty else { return false }
-        // Must be under Snapshots
-        guard isPath(snapshotPath, underDirectory: app.snapshotsPath) else { return false }
-        // Must NOT be equal to Documents or under Documents
-        if isPath(snapshotPath, underDirectory: app.documentsPath) { return false }
-        // Must contain the expected Documents subdir inside the snapshot folder
-        let documentsInsideSnapshot = normalizedPath(snapshotPath + "/Documents")
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: documentsInsideSnapshot, isDirectory: &isDir) {
-            return isDir.boolValue
-        }
-        // Allow deletion even if Documents is missing, but only if the snapshot folder itself is a direct child of Snapshots
-        // i.e., Snapshots/<snapshotName>
-        let parent = normalizedPath((snapshotPath as NSString).deletingLastPathComponent)
-        return parent == normalizedPath(app.snapshotsPath)
+        isDeletableSnapshotDirectory(
+            snapshotPath,
+            snapshotsRoot: app.snapshotsPath,
+            documentsPath: app.documentsPath,
+            simulatorRoot: selectedSimulator?.dataPath
+        )
     }
     
     func deleteSnapshot(_ snapshot: Snapshot) {
-        // Ensure we have a selected app context
-        guard let app = selectedApp else {
+        guard !isSnapshotOperationInProgress else { return }
+        if useMockData {
+            snapshots.removeAll { $0.id == snapshot.id }
+            totalSnapshotsSize = snapshots.reduce(0) { $0 + $1.size }
+            return
+        }
+        guard let selected = selectedApp else {
             log("No selected app; refusing to delete snapshot", type: .error)
+            return
+        }
+        guard let app = liveApp(selected) else {
+            log("Refusing to delete snapshot; app container is not current", type: .error)
             return
         }
         
@@ -1521,57 +1198,56 @@ class SimulatorService: ObservableObject {
         }
     }
     
-    func deleteAllSnapshots() {
-        // Validate all apps before proceeding
-        var validApps: [App] = []
-        
-        for app in apps {
-            if let validatedApp = getValidatedApp(app) {
-                validApps.append(validatedApp)
-            } else {
-                log("Skipping invalid app: \(app.name)", type: .error)
-            }
+    func deleteAllSnapshots(for app: App) {
+        guard !isSnapshotOperationInProgress else { return }
+        if useMockData {
+            snapshots = []
+            totalSnapshotsSize = 0
+            isLoadingTotalSnapshotsSize = false
+            return
         }
-        
-        for app in validApps {
+        guard let current = liveApp(app) else {
+            log("Skipping delete-all; app container is not current", type: .error)
+            return
+        }
+        let snapshotsPath = current.snapshotsPath
+        let documentsPath = current.documentsPath
+        let simulatorRoot = selectedSimulator?.dataPath
+        guard !snapshotsPath.isEmpty else { return }
+
+        isSnapshotOperationInProgress = true
+        snapshotOperationProgress = 0.3
+        snapshotOperationMessage = "Deleting snapshots for \(current.name)..."
+        beginCriticalFileOperation()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                DispatchQueue.main.async {
+                    self.endCriticalFileOperation()
+                    self.isSnapshotOperationInProgress = false
+                    self.snapshotOperationProgress = 0
+                    self.snapshotOperationMessage = ""
+                    self.loadSnapshots(for: current)
+                }
+            }
             do {
                 var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: app.snapshotsPath, isDirectory: &isDir), isDir.boolValue else {
-                    continue
-                }
-                let snapshotDirectories = try FileManager.default.contentsOfDirectory(atPath: app.snapshotsPath)
-                for snapshotDir in snapshotDirectories {
-                    if snapshotDir.hasPrefix(".") { continue }
-                    let snapshotPath = "\(app.snapshotsPath)/\(snapshotDir)"
+                guard FileManager.default.fileExists(atPath: snapshotsPath, isDirectory: &isDir), isDir.boolValue else { return }
+                let children = try FileManager.default.contentsOfDirectory(atPath: snapshotsPath)
+                for name in children {
+                    if name.hasPrefix(".") { continue }
+                    let snapshotPath = (snapshotsPath as NSString).appendingPathComponent(name)
                     var itemIsDir: ObjCBool = false
                     guard FileManager.default.fileExists(atPath: snapshotPath, isDirectory: &itemIsDir), itemIsDir.boolValue else { continue }
-                    // Validate per-item safety
-                    guard isSafeSnapshotPath(snapshotPath, for: app) else {
-                        log("Skipping unsafe snapshot path: \(snapshotPath)", type: .error)
+                    guard isDeletableSnapshotDirectory(snapshotPath, snapshotsRoot: snapshotsPath, documentsPath: documentsPath, simulatorRoot: simulatorRoot) else {
+                        self.log("Skipping unsafe snapshot path: \(snapshotPath)", type: .error)
                         continue
-                    }
-                    // Independent sanity checks
-                    let norm = normalizedPath(snapshotPath)
-                    if norm == normalizedPath(app.documentsPath) || norm == normalizedPath(app.snapshotsPath) || isPath(norm, underDirectory: app.documentsPath) {
-                        log("Skipping due to sanity check: \(snapshotPath)", type: .error)
-                        continue
-                    }
-                    if let sim = selectedSimulator {
-                        let normSim = normalizedPath(sim.dataPath)
-                        if norm == normSim || !isPath(norm, underDirectory: normSim) {
-                            log("Skipping due to simulator-root sanity check: \(snapshotPath)", type: .error)
-                            continue
-                        }
                     }
                     try FileManager.default.removeItem(atPath: snapshotPath)
                 }
             } catch {
-                log("Error deleting snapshots for \(app.name): \(error)", type: .error)
+                self.log("Error deleting snapshots for \(current.name): \(error)", type: .error)
             }
-        }
-        
-        if let selectedApp = selectedApp {
-            loadSnapshots(for: selectedApp)
         }
     }
     
@@ -1721,4 +1397,217 @@ class SimulatorService: ObservableObject {
         ]
     }
     
-} 
+}
+
+// MARK: - Snapshot file operations
+// Pure helpers so capture/restore can be tested without launching the app.
+
+struct ListedFile: Equatable {
+    let relativePath: String
+    let size: Int64
+}
+
+enum SnapshotFileFailure: Error, Equatable, LocalizedError {
+    case missingSnapshotDocuments
+    case unsafeDocumentsPath
+    case validationFailed
+    case rollbackFailed(backupPath: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingSnapshotDocuments:
+            return "The snapshot does not contain a Documents folder"
+        case .unsafeDocumentsPath:
+            return "Refusing to replace a path that is not this simulator's Documents folder"
+        case .validationFailed:
+            return "The copied files did not match the snapshot. The original Documents folder was kept."
+        case .rollbackFailed(let backupPath):
+            return "Restore failed and the previous Documents folder is still at \(backupPath)"
+        }
+    }
+}
+
+func standardizedPath(_ path: String) -> String {
+    URL(fileURLWithPath: path).standardizedFileURL.path
+}
+
+func pathIsInside(_ candidate: String, directory base: String) -> Bool {
+    let candidateNorm = standardizedPath(candidate)
+    let baseNorm = standardizedPath(base)
+    if candidateNorm == baseNorm { return true }
+    let prefix = baseNorm.hasSuffix("/") ? baseNorm : baseNorm + "/"
+    return candidateNorm.hasPrefix(prefix)
+}
+
+func directoryByteSize(at path: String) -> Int64 {
+    guard !path.isEmpty else { return 0 }
+    guard let enumerator = FileManager.default.enumerator(atPath: path) else { return 0 }
+    var total: Int64 = 0
+    while let file = enumerator.nextObject() as? String {
+        let filePath = (path as NSString).appendingPathComponent(file)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let size = (attributes[.size] as? NSNumber)?.int64Value else { continue }
+        total += size
+    }
+    return total
+}
+
+func deviceRecordIsDeleted(_ deviceData: NSDictionary) -> Bool {
+    if let deleted = deviceData["isDeleted"] as? Bool { return deleted }
+    if let deleted = deviceData["isDeleted"] as? NSNumber { return deleted.boolValue }
+    return false
+}
+
+func simulatorIsBooted(at dataPath: String) -> Bool {
+    let plistPath = (dataPath as NSString).appendingPathComponent("device.plist")
+    guard let deviceData = NSDictionary(contentsOfFile: plistPath) else { return false }
+    if let state = deviceData["state"] as? Int { return state == 3 }
+    if let state = deviceData["state"] as? NSNumber { return state.intValue == 3 }
+    return false
+}
+
+func isSafeLiveDocumentsPath(_ documentsPath: String, simulatorRoot: String) -> Bool {
+    guard !documentsPath.isEmpty, !simulatorRoot.isEmpty else { return false }
+    let norm = standardizedPath(documentsPath)
+    guard (norm as NSString).lastPathComponent == "Documents" else { return false }
+    guard pathIsInside(norm, directory: simulatorRoot) else { return false }
+    let parent = standardizedPath((norm as NSString).deletingLastPathComponent)
+    return parent != standardizedPath(simulatorRoot)
+}
+
+func isDeletableSnapshotDirectory(_ snapshotPath: String, snapshotsRoot: String, documentsPath: String, simulatorRoot: String?) -> Bool {
+    guard !snapshotsRoot.isEmpty, !documentsPath.isEmpty, !snapshotPath.isEmpty else { return false }
+    let normTarget = standardizedPath(snapshotPath)
+    let normDocs = standardizedPath(documentsPath)
+    let normSnapshots = standardizedPath(snapshotsRoot)
+    guard pathIsInside(normTarget, directory: normSnapshots) else { return false }
+    if normTarget == normSnapshots || normTarget == normDocs { return false }
+    if pathIsInside(normTarget, directory: normDocs) { return false }
+    if let simulatorRoot, !simulatorRoot.isEmpty {
+        let normSim = standardizedPath(simulatorRoot)
+        if normTarget == normSim || !pathIsInside(normTarget, directory: normSim) { return false }
+    }
+    let documentsInside = (normTarget as NSString).appendingPathComponent("Documents")
+    var isDir: ObjCBool = false
+    if FileManager.default.fileExists(atPath: documentsInside, isDirectory: &isDir), isDir.boolValue {
+        return true
+    }
+    let parent = standardizedPath((normTarget as NSString).deletingLastPathComponent)
+    return parent == normSnapshots
+}
+
+func recursiveFileInfos(at path: String) throws -> [ListedFile] {
+    var files: [ListedFile] = []
+    func enumerate(at currentPath: String, relativePath: String) throws {
+        let contents = try FileManager.default.contentsOfDirectory(atPath: currentPath)
+        for item in contents {
+            let fullPath = (currentPath as NSString).appendingPathComponent(item)
+            let itemRelative = relativePath.isEmpty ? item : (relativePath as NSString).appendingPathComponent(item)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
+                if isDirectory.boolValue {
+                    try enumerate(at: fullPath, relativePath: itemRelative)
+                } else {
+                    let attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
+                    let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+                    files.append(ListedFile(relativePath: itemRelative, size: size))
+                }
+            }
+        }
+    }
+    try enumerate(at: path, relativePath: "")
+    return files.sorted { $0.relativePath < $1.relativePath }
+}
+
+func copiedTreeMatches(sourcePath: String, copyPath: String) throws -> Bool {
+    let sourceFiles = try recursiveFileInfos(at: sourcePath)
+    let copiedFiles = try recursiveFileInfos(at: copyPath)
+    guard sourceFiles.count == copiedFiles.count else { return false }
+    for pair in zip(sourceFiles, copiedFiles) {
+        if pair.0.relativePath != pair.1.relativePath || pair.0.size != pair.1.size {
+            return false
+        }
+    }
+    return true
+}
+
+func captureDocumentsSnapshot(
+    documentsPath: String,
+    snapshotPath: String,
+    validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
+    let destination = (snapshotPath as NSString).appendingPathComponent("Documents")
+    do {
+        try fm.copyItem(atPath: documentsPath, toPath: destination)
+        let matches = try validate(documentsPath, destination)
+        if !matches {
+            try? fm.removeItem(atPath: snapshotPath)
+            throw SnapshotFileFailure.validationFailed
+        }
+    } catch {
+        if fm.fileExists(atPath: snapshotPath) {
+            try? fm.removeItem(atPath: snapshotPath)
+        }
+        throw error
+    }
+}
+
+func restoreDocumentsReplacingLiveCopy(
+    snapshotDocumentsPath: String,
+    documentsPath: String,
+    simulatorRoot: String,
+    validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+) throws {
+    guard isSafeLiveDocumentsPath(documentsPath, simulatorRoot: simulatorRoot) else {
+        throw SnapshotFileFailure.unsafeDocumentsPath
+    }
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: snapshotDocumentsPath, isDirectory: &isDir), isDir.boolValue else {
+        throw SnapshotFileFailure.missingSnapshotDocuments
+    }
+
+    let fm = FileManager.default
+    let parent = (documentsPath as NSString).deletingLastPathComponent
+    let backupPath = (parent as NSString).appendingPathComponent(".simmer-documents-backup-\(UUID().uuidString)")
+    let hadDocuments = fm.fileExists(atPath: documentsPath)
+
+    if hadDocuments {
+        try fm.moveItem(atPath: documentsPath, toPath: backupPath)
+    }
+
+    func rollBack() throws {
+        if fm.fileExists(atPath: documentsPath) {
+            try fm.removeItem(atPath: documentsPath)
+        }
+        if hadDocuments {
+            try fm.moveItem(atPath: backupPath, toPath: documentsPath)
+        }
+    }
+
+    do {
+        try fm.copyItem(atPath: snapshotDocumentsPath, toPath: documentsPath)
+        let matches = try validate(snapshotDocumentsPath, documentsPath)
+        if !matches {
+            do {
+                try rollBack()
+            } catch {
+                throw SnapshotFileFailure.rollbackFailed(backupPath: backupPath)
+            }
+            throw SnapshotFileFailure.validationFailed
+        }
+        if hadDocuments {
+            try? fm.removeItem(atPath: backupPath)
+        }
+    } catch let failure as SnapshotFileFailure {
+        throw failure
+    } catch {
+        do {
+            try rollBack()
+        } catch {
+            throw SnapshotFileFailure.rollbackFailed(backupPath: backupPath)
+        }
+        throw error
+    }
+}

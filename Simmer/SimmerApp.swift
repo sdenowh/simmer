@@ -54,14 +54,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     
     private func setupKeyboardShortcuts() {
-        // Add keyboard shortcut to toggle mock data (⌘+M)
+        #if DEBUG
+        // Debug-only. The monitor swallows the key, so it must not ship:
+        // ⌘M is Minimize, and mock mode can overwrite saved pins.
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.modifierFlags.contains(.command) && event.characters == "m" {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags == .command, event.charactersIgnoringModifiers == "m", !event.isARepeat {
                 self.toggleMockData()
                 return nil
             }
             return event
         }
+        #endif
     }
     
     private func setupEditMenu() {
@@ -153,17 +157,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     
     func popoverDidShow(_ notification: Notification) {
         appState.popoverAppearanceCount += 1
-        
-        // Refresh disk usage for expanded apps
-        simulatorService.refreshSelectedAppDiskUsage()
-        
-        // Refresh documents size for all apps in the current simulator
+        if let window = popover?.contentViewController?.view.window {
+            popoverWindowProvider.window = window
+            window.appearance = NSAppearance(named: .darkAqua)
+        }
+
+        // Reload apps first so selectedApp points at the current container,
+        // then refresh snapshots from that updated record.
         if let selectedSimulator = simulatorService.selectedSimulator {
-            print("Refreshing documents size for all apps in simulator: \(selectedSimulator.name)")
-            
-            // Force a complete refresh of the apps list which will recalculate all document sizes
-            simulatorService.objectWillChange.send()
             simulatorService.loadApps(for: selectedSimulator)
+            simulatorService.refreshSelectedAppDiskUsage()
         }
     }
 }
