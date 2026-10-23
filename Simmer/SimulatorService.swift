@@ -9,6 +9,12 @@ import Foundation
 import AppKit
 import os.log
 
+enum PushSendOutcome {
+    case sent
+    case rejected(String)
+    case failed(String)
+}
+
 class SimulatorService: ObservableObject {
     private let logger = Logger(subsystem: "com.simmer.app", category: "SimulatorService")
     
@@ -38,7 +44,10 @@ class SimulatorService: ObservableObject {
         logger.log(level: type, "\(message)")
         #else
         NSLog("[Simmer] \(message)")
-        print("[Simmer] \(message)")
+        // Stdio MCP framing owns stdout. Release logs stay in the system log.
+        if !MCPProcess.stdio {
+            print("[Simmer] \(message)")
+        }
         #endif
     }
     
@@ -60,6 +69,8 @@ class SimulatorService: ObservableObject {
     private var snapshotLoadGeneration = 0
     private var snapshotsSizeGeneration = 0
     private let criticalOperationReason = "Simmer snapshot operation"
+    private let snapshotLock = NSLock()
+    private var snapshotBlockedUntil: Date?
     
     init() {
         loadSimulators()
@@ -147,95 +158,82 @@ class SimulatorService: ObservableObject {
     }
 
     func sendPushNotification(payloadJSON: String, name: String?, for app: App, on simulator: Simulator, saveToHistory: Bool = true, completion: ((Bool, String?) -> Void)? = nil) {
-        // Validate JSON
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = self.performPushNotification(payloadJSON: payloadJSON, name: name, for: app, on: simulator, saveToHistory: saveToHistory)
+            DispatchQueue.main.async {
+                switch outcome {
+                case .sent:
+                    self.deliverBanner("Push sent to \(app.name) on \(simulator.name)")
+                    completion?(true, nil)
+                case .rejected(let message):
+                    completion?(false, message)
+                case .failed(let message):
+                    self.log("Push failed: \(message)", type: .error)
+                    self.deliverBanner("Push failed: \(message)")
+                    completion?(false, message)
+                }
+            }
+        }
+    }
+
+    func performPushNotification(payloadJSON: String, name: String?, for app: App, on simulator: Simulator, saveToHistory: Bool) -> PushSendOutcome {
         guard let data = payloadJSON.data(using: .utf8) else {
-            completion?(false, "Invalid UTF-8 payload")
-            return
+            return .rejected("Invalid UTF-8 payload")
         }
         do {
             _ = try JSONSerialization.jsonObject(with: data, options: [])
         } catch {
-            completion?(false, "Payload is not valid JSON: \(error.localizedDescription)")
-            return
+            return .rejected("Payload is not valid JSON: \(error.localizedDescription)")
         }
 
         guard simulatorIsBooted(at: simulator.dataPath) else {
-            completion?(false, "\(simulator.name) is not booted. Boot it in Simulator and try again.")
-            return
+            return .rejected("\(simulator.name) is not booted. Boot it in Simulator and try again.")
         }
 
-        // Write to temp .apns file
         let tempDir = NSTemporaryDirectory()
         let filePath = (tempDir as NSString).appendingPathComponent("simmer-\(UUID().uuidString).apns")
         do {
             try payloadJSON.write(toFile: filePath, atomically: true, encoding: .utf8)
         } catch {
-            completion?(false, "Failed to write temp file: \(error.localizedDescription)")
-            return
+            return .rejected("Failed to write temp file: \(error.localizedDescription)")
+        }
+        defer { try? FileManager.default.removeItem(atPath: filePath) }
+
+        let process = Process()
+        process.launchPath = "/usr/bin/xcrun"
+        process.arguments = ["simctl", "push", simulator.udid, app.bundleIdentifier, filePath]
+
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+
+        do {
+            try process.run()
+        } catch {
+            log("Failed to run simctl push: \(error)", type: .error)
+            return .failed("Failed to run simctl push: \(error.localizedDescription)")
         }
 
-        // Run simctl push
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.launchPath = "/usr/bin/xcrun"
-            process.arguments = ["simctl", "push", simulator.udid, app.bundleIdentifier, filePath]
+        process.waitUntilExit()
 
-            let pipe = Pipe()
-            let errPipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = errPipe
-
-            do {
-                try process.run()
-            } catch {
-                DispatchQueue.main.async {
-                    self.log("Failed to run simctl push: \(error)", type: .error)
-                    completion?(false, "Failed to run simctl push: \(error.localizedDescription)")
-                }
-                try? FileManager.default.removeItem(atPath: filePath)
-                return
-            }
-
-            process.waitUntilExit()
-
-            let success = process.terminationStatus == 0
-            let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outputData, encoding: .utf8) ?? ""
-            let errOutput = String(data: errData, encoding: .utf8) ?? ""
-
-            // Clean up temp
-            try? FileManager.default.removeItem(atPath: filePath)
-
-            DispatchQueue.main.async {
-                if success {
-                    self.log("Push sent successfully: \(output)")
-                    // Persist history unless disabled
-                    if saveToHistory {
-                        var existing = self.getPushHistory(for: app, on: simulator)
-                        let fallbackName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let finalName = (fallbackName?.isEmpty == false ? fallbackName! : (self.extractAlertTitle(from: payloadJSON) ?? ""))
-                        let item = SentNotification(id: UUID().uuidString, name: finalName, createdAt: Date(), payloadJSON: payloadJSON)
-                        existing.append(item)
-                        self.savePushHistory(existing, for: app, on: simulator)
-                    }
-
-                    // User notification
-                    let n = NSUserNotification()
-                    n.title = "Simmer"
-                    n.informativeText = "Push sent to \(app.name) on \(simulator.name)"
-                    NSUserNotificationCenter.default.deliver(n)
-                    completion?(true, nil)
-                } else {
-                    self.log("Push failed: \(errOutput)", type: .error)
-                    let n = NSUserNotification()
-                    n.title = "Simmer"
-                    n.informativeText = "Push failed: \(errOutput)"
-                    NSUserNotificationCenter.default.deliver(n)
-                    completion?(false, errOutput.isEmpty ? output : errOutput)
-                }
-            }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            let message = errOutput.isEmpty ? output : errOutput
+            return .failed(message.isEmpty ? "simctl push failed" : message)
         }
+
+        log("Push sent successfully: \(output)")
+        if saveToHistory {
+            var existing = getPushHistory(for: app, on: simulator)
+            let fallbackName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalName = (fallbackName?.isEmpty == false ? fallbackName! : (extractAlertTitle(from: payloadJSON) ?? ""))
+            let item = SentNotification(id: UUID().uuidString, name: finalName, createdAt: Date(), payloadJSON: payloadJSON)
+            existing.append(item)
+            savePushHistory(existing, for: app, on: simulator)
+        }
+        return .sent
     }
 
     func repeatLastPush(for app: App, on simulator: Simulator, completion: ((Bool, String?) -> Void)? = nil) {
@@ -356,7 +354,7 @@ class SimulatorService: ObservableObject {
         apps[appIndex].finishLoadingDocumentsSize(calculatedSize)
     }
     
-    private func getAvailableSimulators() -> [Simulator] {
+    func getAvailableSimulators() -> [Simulator] {
         var simulators: [Simulator] = []
         
         do {
@@ -420,7 +418,7 @@ class SimulatorService: ObservableObject {
         }
     }
     
-    private func getApps(for simulator: Simulator) -> [App] {
+    func getApps(for simulator: Simulator) -> [App] {
         var apps: [App] = []
         let dataPath = simulator.dataPath
         
@@ -849,7 +847,7 @@ class SimulatorService: ObservableObject {
     /// True when `documentsPath` still sits in the data container CoreSimulator
     /// currently assigns to this bundle id. A reinstall mints a new UUID, and
     /// the old path must not be recreated.
-    private func isLiveDataContainer(_ app: App) -> Bool {
+    func isLiveDataContainer(_ app: App) -> Bool {
         guard !app.documentsPath.isEmpty, !app.bundleIdentifier.isEmpty else { return false }
         let container = (app.documentsPath as NSString).deletingLastPathComponent
         var isDir: ObjCBool = false
@@ -879,6 +877,38 @@ class SimulatorService: ObservableObject {
         return updated
     }
 
+    func tryBeginSnapshotOperation() -> Bool {
+        guard snapshotLock.`try`() else { return false }
+        if let snapshotBlockedUntil, snapshotBlockedUntil > Date() {
+            snapshotLock.unlock()
+            return false
+        }
+        snapshotBlockedUntil = nil
+        return true
+    }
+
+    func endSnapshotOperation() {
+        snapshotLock.unlock()
+    }
+
+    func blockFurtherSnapshots(for interval: TimeInterval) {
+        snapshotBlockedUntil = Date().addingTimeInterval(interval)
+    }
+
+    func deliverBanner(_ text: String) {
+        let post = {
+            let notification = NSUserNotification()
+            notification.title = "Simmer"
+            notification.informativeText = text
+            NSUserNotificationCenter.default.deliver(notification)
+        }
+        if Thread.isMainThread {
+            post()
+        } else {
+            DispatchQueue.main.async(execute: post)
+        }
+    }
+
     private func beginCriticalFileOperation() {
         ProcessInfo.processInfo.disableSuddenTermination()
         ProcessInfo.processInfo.disableAutomaticTermination(criticalOperationReason)
@@ -889,7 +919,7 @@ class SimulatorService: ObservableObject {
         ProcessInfo.processInfo.enableSuddenTermination()
     }
 
-    private func terminateRunningApp(_ app: App, on simulator: Simulator) {
+    func terminateRunningApp(_ app: App, on simulator: Simulator) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         process.arguments = ["simctl", "terminate", simulator.udid, app.bundleIdentifier]
@@ -904,6 +934,7 @@ class SimulatorService: ObservableObject {
     }
 
     private func reportSnapshotFailure(_ message: String) {
+        blockFurtherSnapshots(for: 4)
         isSnapshotOperationInProgress = true
         snapshotOperationProgress = 1
         snapshotOperationMessage = message
@@ -977,7 +1008,9 @@ class SimulatorService: ObservableObject {
     }
     
     func takeSnapshot(for app: App) {
-        guard !isSnapshotOperationInProgress else { return }
+        guard tryBeginSnapshotOperation() else { return }
+        var handedOff = false
+        defer { if !handedOff { endSnapshotOperation() } }
         guard let validatedApp = liveApp(app) else {
             log("Documents container invalid for \(app.name), cannot take snapshot", type: .error)
             reportSnapshotFailure("Couldn't find this app's container, so no snapshot was taken.")
@@ -1001,9 +1034,11 @@ class SimulatorService: ObservableObject {
         snapshotOperationProgress = 0
         snapshotOperationMessage = "Preparing snapshot..."
         beginCriticalFileOperation()
+        handedOff = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
+                self.endSnapshotOperation()
                 DispatchQueue.main.async { self.endCriticalFileOperation() }
             }
             do {
@@ -1027,6 +1062,7 @@ class SimulatorService: ObservableObject {
                 }
                 self.log("Snapshot created successfully: \(snapshotName)")
             } catch {
+                self.blockFurtherSnapshots(for: 4)
                 DispatchQueue.main.async {
                     self.snapshotOperationProgress = 1
                     self.snapshotOperationMessage = "Snapshot failed: \(error.localizedDescription). Close the app if it has these files open, then try again."
@@ -1042,7 +1078,9 @@ class SimulatorService: ObservableObject {
     }
 
     func restoreSnapshot(_ snapshot: Snapshot, for app: App) {
-        guard !isSnapshotOperationInProgress else { return }
+        guard tryBeginSnapshotOperation() else { return }
+        var handedOff = false
+        defer { if !handedOff { endSnapshotOperation() } }
         guard let validatedApp = liveApp(app) else {
             reportSnapshotFailure("Couldn't find this app's container, so nothing was changed.")
             return
@@ -1063,9 +1101,11 @@ class SimulatorService: ObservableObject {
         snapshotOperationProgress = 0
         snapshotOperationMessage = "Preparing to restore snapshot..."
         beginCriticalFileOperation()
+        handedOff = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
+                self.endSnapshotOperation()
                 DispatchQueue.main.async { self.endCriticalFileOperation() }
             }
             self.terminateRunningApp(validatedApp, on: simulator)
@@ -1099,6 +1139,7 @@ class SimulatorService: ObservableObject {
             self.log("Restore validation failed on attempt \(attempt). Original Documents were kept. Retrying...")
             self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: app, simulator: simulator, attempt: attempt + 1)
         } catch {
+            self.blockFurtherSnapshots(for: 4)
             DispatchQueue.main.async {
                 self.snapshotOperationProgress = 1
                 self.snapshotOperationMessage = error.localizedDescription
@@ -1132,7 +1173,8 @@ class SimulatorService: ObservableObject {
     }
     
     func deleteSnapshot(_ snapshot: Snapshot) {
-        guard !isSnapshotOperationInProgress else { return }
+        guard tryBeginSnapshotOperation() else { return }
+        defer { endSnapshotOperation() }
         if useMockData {
             snapshots.removeAll { $0.id == snapshot.id }
             totalSnapshotsSize = snapshots.reduce(0) { $0 + $1.size }
@@ -1199,7 +1241,9 @@ class SimulatorService: ObservableObject {
     }
     
     func deleteAllSnapshots(for app: App) {
-        guard !isSnapshotOperationInProgress else { return }
+        guard tryBeginSnapshotOperation() else { return }
+        var handedOff = false
+        defer { if !handedOff { endSnapshotOperation() } }
         if useMockData {
             snapshots = []
             totalSnapshotsSize = 0
@@ -1219,9 +1263,11 @@ class SimulatorService: ObservableObject {
         snapshotOperationProgress = 0.3
         snapshotOperationMessage = "Deleting snapshots for \(current.name)..."
         beginCriticalFileOperation()
+        handedOff = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
+                self.endSnapshotOperation()
                 DispatchQueue.main.async {
                     self.endCriticalFileOperation()
                     self.isSnapshotOperationInProgress = false

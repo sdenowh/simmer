@@ -16,6 +16,12 @@ class PopoverWindowProvider: ObservableObject {
 @main
 struct SimmerApp {
     static func main() {
+        if CommandLine.arguments.contains("--mcp") {
+            MCPProcess.stdio = true
+            let service = SimulatorService()
+            MCPStdioServer(backend: service).run()
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -35,6 +41,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var contentView: ContentView?
     private let popoverWindowProvider = PopoverWindowProvider()
     private var updaterController: SPUStandardUpdaterController?
+    private var mcpHTTP: MCPHTTPServer?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -43,6 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         setupEditMenu()
         // Initialize Sparkle updater
         updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        startMCPServer()
         // Show the popover automatically on launch, after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             self.togglePopover()
@@ -51,6 +59,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc func checkForUpdates(_ sender: Any?) {
         updaterController?.checkForUpdates(sender)
+    }
+
+    private func startMCPServer() {
+        let server = MCPHTTPServer(backend: simulatorService, publishesStatus: true)
+        mcpHTTP = server
+        do {
+            try server.start()
+        } catch {
+            NSLog("[Simmer] MCP server failed to start: \(error.localizedDescription)")
+            MCPRuntimeStatus.shared.noteFailure(error.localizedDescription)
+        }
     }
     
     private func setupKeyboardShortcuts() {

@@ -38,7 +38,7 @@ struct AboutView: View {
             Divider()
 
             VStack(spacing: 8) {
-                Text("Simmer is an open-source menubar app for iOS Simulator management.")
+                Text("Simmer is an open-source menubar app for iOS Simulator management. Agents can create snapshots, restore them, and send push notifications through the local MCP server.")
                     .font(.system(size: 12))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)

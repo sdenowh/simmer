@@ -14,6 +14,7 @@ import AppKit
 struct ContentView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var simulatorService: SimulatorService
+    @ObservedObject private var mcpStatus = MCPRuntimeStatus.shared
     @State private var selectedSimulator: Simulator?
     @State private var selectedApp: App?
     
@@ -23,6 +24,23 @@ struct ContentView: View {
             return "\(version) (\(build))"
         }
         return "Unknown"
+    }
+
+    private func copyMCPConfig() {
+        let entry: [String: Any]
+        if mcpStatus.isRunning {
+            entry = SimmerMCPConfig.httpServerEntry()
+        } else if let executable = Bundle.main.executablePath {
+            entry = SimmerMCPConfig.stdioServerEntry(executablePath: executable)
+        } else {
+            entry = SimmerMCPConfig.httpServerEntry()
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(SimmerMCPConfig.pretty(entry), forType: .string)
+        let notification = NSUserNotification()
+        notification.title = "Simmer"
+        notification.informativeText = "MCP config copied. Add it to Cursor's MCP settings."
+        NSUserNotificationCenter.default.deliver(notification)
     }
     
     // Public method to refresh disk usage for expanded app
@@ -46,6 +64,15 @@ struct ContentView: View {
                     Button("Refresh Simulators") {
                         simulatorService.loadSimulators()
                     }
+
+                    Divider()
+
+                    Button("Copy MCP Config") {
+                        copyMCPConfig()
+                    }
+
+                    Text("MCP \(mcpStatus.detail)")
+                        .disabled(true)
                     
                     Divider()
                     

@@ -96,6 +96,7 @@ jobs:
           A macOS menubar application for iOS Simulator management.
           
           ### Whats New
+          - MCP tools for agents: create and restore Documents snapshots, and send push notifications
           - iOS Simulator management
           - App document management
           - Snapshot creation and restoration
@@ -111,6 +112,7 @@ jobs:
           - **App Management**: View installed apps and their documents
           - **Document Management**: Access and manage app documents
           - **Snapshot Management**: Create and restore document snapshots
+          - **MCP**: Local tools so an agent can snapshot, restore, and send pushes while Simmer is running
           
           ### System Requirements
           - macOS 14.0 or later
