@@ -70,12 +70,14 @@ extension SimulatorService: MCPBackend {
             if !FileManager.default.fileExists(atPath: app.snapshotsPath) {
                 try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
             }
-            showSnapshotProgress("Copying documents...", progress: 0.4)
             try captureDocumentsSnapshot(
                 documentsPath: app.documentsPath,
                 snapshotPath: snapshotPath,
+                onProgress: { message, fraction in
+                    self.noteSnapshotProgress(message: message, fraction: fraction)
+                },
                 onRetry: { _, error in
-                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying snapshot...", progress: 0.4)
+                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying snapshot...", progress: 0)
                 }
             )
             if !trimmedName.isEmpty {
@@ -130,16 +132,18 @@ extension SimulatorService: MCPBackend {
         }
         defer { endSnapshotOperation() }
 
-        showSnapshotProgress("Preparing to restore snapshot...", progress: 0.2)
+        showSnapshotProgress("Preparing to restore snapshot...", progress: 0)
         terminateRunningApp(app, on: device)
         do {
-            showSnapshotProgress("Restoring snapshot...", progress: 0.4)
             try restoreDocumentsReplacingLiveCopy(
                 snapshotDocumentsPath: snapshotDocuments,
                 documentsPath: app.documentsPath,
                 simulatorRoot: device.dataPath,
+                onProgress: { message, fraction in
+                    self.noteSnapshotProgress(message: message, fraction: fraction)
+                },
                 onRetry: { _, error in
-                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying restore...", progress: 0.4)
+                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying restore...", progress: 0)
                 }
             )
         } catch {

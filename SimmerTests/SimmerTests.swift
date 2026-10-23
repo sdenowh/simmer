@@ -317,6 +317,107 @@ struct SnapshotFileOperationTests {
         #expect(leftovers.contains { $0.hasPrefix(".simmer-documents-backup-") } == false)
     }
 
+    @Test func progressAdvancesWhileBytesAreCopiedAndVerified() {
+        let progress = SnapshotTransferProgress(operation: .capture, report: nil)
+        progress.noteInventoryEntry(byteSize: 5_000_000)
+        progress.finishInventory()
+        let afterInventory = progress.fraction
+
+        progress.noteCopyProgress(copiedBytes: 1_000_000, fileSize: 5_000_000)
+        let earlyCopy = progress.fraction
+        progress.noteCopyProgress(copiedBytes: 4_000_000, fileSize: 5_000_000)
+        let lateCopy = progress.fraction
+        #expect(earlyCopy > afterInventory)
+        #expect(lateCopy > earlyCopy)
+
+        progress.noteCopyFinished(fileSize: 5_000_000)
+        progress.finishCopy()
+        let afterCopy = progress.fraction
+        #expect(afterCopy > lateCopy)
+
+        progress.noteStabilityEntry()
+        progress.finishStability()
+        progress.beginVerifyingOriginal()
+        let beforeVerify = progress.fraction
+        progress.noteVerifiedBytes(2_000_000)
+        let midVerify = progress.fraction
+        #expect(midVerify > beforeVerify)
+        #expect(midVerify < 0.95)
+
+        progress.noteVerifiedBytes(3_000_000)
+        progress.noteVerifiedEntry()
+        let afterOriginal = progress.fraction
+        progress.beginVerifyingCopy()
+        #expect(progress.fraction >= afterOriginal)
+        progress.noteVerifiedBytes(5_000_000)
+        progress.noteVerifiedEntry()
+        progress.finish()
+        #expect(progress.fraction == 1)
+    }
+
+    @Test func progressAdvancesAcrossManyFiles() {
+        let progress = SnapshotTransferProgress(operation: .capture, report: nil)
+        for _ in 0..<40 {
+            progress.noteInventoryEntry(byteSize: 32)
+        }
+        progress.finishInventory()
+        let beforeCopy = progress.fraction
+        var last = beforeCopy
+        for _ in 0..<40 {
+            progress.noteCopyFinished(fileSize: 32)
+            #expect(progress.fraction >= last)
+            last = progress.fraction
+        }
+        #expect(progress.fraction > beforeCopy)
+        #expect(progress.fraction > 0.1)
+    }
+
+    @Test func capturePublishesMovingProgress() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try Data(repeating: 0xAB, count: 256 * 1024).write(to: fixture.documents.appendingPathComponent("blob.bin"))
+        try FileManager.default.createDirectory(at: fixture.documents.appendingPathComponent("Notes", isDirectory: true), withIntermediateDirectories: true)
+        try "page".write(to: fixture.documents.appendingPathComponent("Notes/page.txt"), atomically: true, encoding: .utf8)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/progress", isDirectory: true)
+
+        var samples: [ProgressSample] = []
+        try captureDocumentsSnapshot(
+            documentsPath: fixture.documents.path,
+            snapshotPath: snapshot.path,
+            onProgress: { samples.append(ProgressSample(message: $0, fraction: $1)) }
+        )
+        #expect(samples.contains { $0.message.contains("Counting files") })
+        #expect(samples.contains { $0.message.contains("Copying documents") })
+        #expect(samples.contains { $0.message.contains("Verifying original") })
+        #expect(samples.contains { $0.message.contains("Verifying snapshot") })
+        expectMoving(samples)
+        let copied = try String(contentsOf: snapshot.appendingPathComponent("Documents/Notes/page.txt"), encoding: .utf8)
+        #expect(copied == "page")
+    }
+
+    @Test func restorePublishesMovingProgress() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try "keep".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        let snapshotDocuments = try makeSnapshotDocuments(in: fixture, named: "snap", contents: "restored")
+        try FileManager.default.createDirectory(at: snapshotDocuments.appendingPathComponent("Notes", isDirectory: true), withIntermediateDirectories: true)
+        try "page".write(to: snapshotDocuments.appendingPathComponent("Notes/page.txt"), atomically: true, encoding: .utf8)
+
+        var samples: [ProgressSample] = []
+        try restoreDocumentsReplacingLiveCopy(
+            snapshotDocumentsPath: snapshotDocuments.path,
+            documentsPath: fixture.documents.path,
+            simulatorRoot: fixture.root.path,
+            onProgress: { samples.append(ProgressSample(message: $0, fraction: $1)) }
+        )
+        #expect(samples.contains { $0.message.contains("Restoring documents") })
+        #expect(samples.contains { $0.message.contains("Verifying snapshot") })
+        #expect(samples.contains { $0.message.contains("Verifying restored documents") })
+        expectMoving(samples)
+        let text = try String(contentsOf: fixture.documents.appendingPathComponent("Notes/page.txt"), encoding: .utf8)
+        #expect(text == "page")
+    }
+
     @Test func repeatedSnapshotClicksWhileOneIsRunningCreateOnlyOne() throws {
         let fixture = try makeContainer()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -348,6 +449,20 @@ struct SnapshotFileOperationTests {
         let copied = try String(contentsOf: snapshots.appendingPathComponent("\(name)/Documents/note.txt"), encoding: .utf8)
         #expect(copied == "keep")
     }
+}
+
+private struct ProgressSample {
+    var message: String
+    var fraction: Double
+}
+
+private func expectMoving(_ samples: [ProgressSample]) {
+    #expect(samples.count >= 4)
+    for pair in zip(samples, samples.dropFirst()) {
+        #expect(pair.1.fraction + 0.000_001 >= pair.0.fraction)
+    }
+    #expect(samples.contains { $0.fraction > 0.2 && $0.fraction < 0.9 })
+    #expect((samples.last?.fraction ?? 0) > 0.95)
 }
 
 private struct ContainerFixture {

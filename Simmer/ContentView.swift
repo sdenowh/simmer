@@ -178,12 +178,14 @@ struct ContentView: View {
                             .multilineTextAlignment(.center)
 
                         if !simulatorService.snapshotOperationFailed {
-                            ProgressView(value: simulatorService.snapshotOperationProgress)
+                            ProgressView(value: min(max(simulatorService.snapshotOperationProgress, 0), 1))
                                 .progressViewStyle(LinearProgressViewStyle(tint: .blue))
                                 .scaleEffect(y: 0.8)
+                                .transaction { $0.animation = nil }
 
-                            Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
+                            Text(snapshotProgressPercent(simulatorService.snapshotOperationProgress))
                                 .font(.system(size: 11))
+                                .monospacedDigit()
                                 .foregroundColor(.white.opacity(0.8))
                         }
                     }
@@ -206,6 +208,12 @@ struct ContentView: View {
             .frame(width: 320, height: 450)
         }
     }
+}
+
+private func snapshotProgressPercent(_ fraction: Double) -> String {
+    let percent = min(max(fraction, 0), 1) * 100
+    if percent >= 100 { return "100%" }
+    return String(format: "%.1f%%", percent)
 }
 
 #if os(macOS)

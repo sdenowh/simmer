@@ -8,6 +8,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import Darwin
 import os.log
 
 enum PushSendOutcome {
@@ -960,6 +961,14 @@ class SimulatorService: ObservableObject {
         clearSnapshotOperationStatus()
         endSnapshotOperation()
     }
+
+    func noteSnapshotProgress(message: String, fraction: Double) {
+        DispatchQueue.main.async {
+            guard self.isSnapshotOperationInProgress, !self.snapshotOperationFailed else { return }
+            self.snapshotOperationMessage = message
+            self.snapshotOperationProgress = min(max(fraction, 0), 1)
+        }
+    }
     
     // MARK: - Updated Functions with Path Validation
     
@@ -1061,17 +1070,16 @@ class SimulatorService: ObservableObject {
                 if !FileManager.default.fileExists(atPath: validatedApp.snapshotsPath) {
                     try FileManager.default.createDirectory(atPath: validatedApp.snapshotsPath, withIntermediateDirectories: true)
                 }
-                DispatchQueue.main.async {
-                    self.snapshotOperationProgress = 0.4
-                    self.snapshotOperationMessage = "Copying documents..."
-                }
                 try captureDocumentsSnapshot(
                     documentsPath: validatedApp.documentsPath,
                     snapshotPath: snapshotPath,
+                    onProgress: { message, fraction in
+                        self.noteSnapshotProgress(message: message, fraction: fraction)
+                    },
                     onRetry: { attempt, error in
                         DispatchQueue.main.async {
                             self.snapshotOperationFailed = false
-                            self.snapshotOperationProgress = 0.4
+                            self.snapshotOperationProgress = 0
                             self.snapshotOperationMessage = "Temporary problem (\(error.localizedDescription)). Retrying snapshot..."
                         }
                         self.log("Snapshot attempt \(attempt) failed: \(error). Retrying.")
@@ -1140,20 +1148,18 @@ class SimulatorService: ObservableObject {
     }
 
     private func performRestore(snapshotDocumentsPath: String, app: App, simulator: Simulator) {
-        DispatchQueue.main.async {
-            self.snapshotOperationFailed = false
-            self.snapshotOperationProgress = 0.4
-            self.snapshotOperationMessage = "Restoring snapshot..."
-        }
         do {
             try restoreDocumentsReplacingLiveCopy(
                 snapshotDocumentsPath: snapshotDocumentsPath,
                 documentsPath: app.documentsPath,
                 simulatorRoot: simulator.dataPath,
+                onProgress: { message, fraction in
+                    self.noteSnapshotProgress(message: message, fraction: fraction)
+                },
                 onRetry: { attempt, error in
                     DispatchQueue.main.async {
                         self.snapshotOperationFailed = false
-                        self.snapshotOperationProgress = 0.4
+                        self.snapshotOperationProgress = 0
                         self.snapshotOperationMessage = "Temporary problem (\(error.localizedDescription)). Retrying restore..."
                     }
                     self.log("Restore attempt \(attempt) failed: \(error). Retrying.")
@@ -1664,7 +1670,7 @@ func retryingTransientSnapshot<T>(
     throw lastError ?? SnapshotFileFailure.validationFailed
 }
 
-private func hashFileContents(at path: String) throws -> Data {
+private func hashFileContents(at path: String, onBytesRead: ((Int64) -> Void)? = nil) throws -> Data {
     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
     defer { try? handle.close() }
     var hasher = SHA256()
@@ -1672,13 +1678,19 @@ private func hashFileContents(at path: String) throws -> Data {
         let chunk = try handle.read(upToCount: 1024 * 1024)
         guard let chunk, !chunk.isEmpty else { break }
         hasher.update(data: chunk)
+        onBytesRead?(Int64(chunk.count))
     }
     return Data(hasher.finalize())
 }
 
 /// Lists every entry under `path`. A name that cannot be inspected throws.
 /// Skipping it would let a partial copy look identical to the source.
-func fileTreeEntries(at path: String, hashContents: Bool) throws -> [ListedFile] {
+func fileTreeEntries(
+    at path: String,
+    hashContents: Bool,
+    onBytesRead: ((Int64) -> Void)? = nil,
+    onEntry: ((ListedFile) -> Void)? = nil
+) throws -> [ListedFile] {
     var files: [ListedFile] = []
     func enumerate(at currentPath: String, relativePath: String, depth: Int) throws {
         if depth > snapshotTreeDepthLimit {
@@ -1702,15 +1714,19 @@ func fileTreeEntries(at path: String, hashContents: Bool) throws -> [ListedFile]
                 } catch {
                     throw SnapshotFileFailure.unreadableItem(itemRelative)
                 }
-                files.append(ListedFile(relativePath: itemRelative, kind: .symlink(target: target)))
+                let listed = ListedFile(relativePath: itemRelative, kind: .symlink(target: target))
+                files.append(listed)
+                onEntry?(listed)
             } else if type == .typeDirectory {
-                files.append(ListedFile(relativePath: itemRelative, kind: .directory))
+                let listed = ListedFile(relativePath: itemRelative, kind: .directory)
+                files.append(listed)
+                onEntry?(listed)
                 try enumerate(at: fullPath, relativePath: itemRelative, depth: depth + 1)
             } else if type == .typeRegular {
                 let hash: Data?
                 if hashContents {
                     do {
-                        hash = try hashFileContents(at: fullPath)
+                        hash = try hashFileContents(at: fullPath, onBytesRead: onBytesRead)
                     } catch {
                         throw SnapshotFileFailure.unreadableItem(itemRelative)
                     }
@@ -1719,12 +1735,16 @@ func fileTreeEntries(at path: String, hashContents: Bool) throws -> [ListedFile]
                 }
                 let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
                 let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-                files.append(ListedFile(
+                let listed = ListedFile(
                     relativePath: itemRelative,
                     kind: .file(size: size, modified: modified, contentHash: hash)
-                ))
+                )
+                files.append(listed)
+                onEntry?(listed)
             } else {
-                files.append(ListedFile(relativePath: itemRelative, kind: .other))
+                let listed = ListedFile(relativePath: itemRelative, kind: .other)
+                files.append(listed)
+                onEntry?(listed)
             }
         }
     }
@@ -1742,9 +1762,18 @@ private func ignoringTimestamps(_ files: [ListedFile]) -> [ListedFile] {
     }
 }
 
-func copiedTreeMatches(sourcePath: String, copyPath: String) throws -> Bool {
-    let sourceFiles = try fileTreeEntries(at: sourcePath, hashContents: true)
-    let copiedFiles = try fileTreeEntries(at: copyPath, hashContents: true)
+func copiedTreeMatches(
+    sourcePath: String,
+    copyPath: String,
+    sourceBytes: ((Int64) -> Void)? = nil,
+    sourceEntry: ((ListedFile) -> Void)? = nil,
+    copyBytes: ((Int64) -> Void)? = nil,
+    copyEntry: ((ListedFile) -> Void)? = nil,
+    beforeCopyWalk: (() -> Void)? = nil
+) throws -> Bool {
+    let sourceFiles = try fileTreeEntries(at: sourcePath, hashContents: true, onBytesRead: sourceBytes, onEntry: sourceEntry)
+    beforeCopyWalk?()
+    let copiedFiles = try fileTreeEntries(at: copyPath, hashContents: true, onBytesRead: copyBytes, onEntry: copyEntry)
     return ignoringTimestamps(sourceFiles) == ignoringTimestamps(copiedFiles)
 }
 
@@ -1755,14 +1784,16 @@ func captureDocumentsSnapshot(
     retryDelay: TimeInterval = snapshotTransientRetryDelay,
     sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
     afterCopy: (() -> Void)? = nil,
+    onProgress: ((String, Double) -> Void)? = nil,
     onRetry: ((Int, Error) -> Void)? = nil,
-    validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+    validate: ((String, String) throws -> Bool)? = nil
 ) throws {
     try retryingTransientSnapshot(maxAttempts: maxAttempts, retryDelay: retryDelay, sleep: sleep, onRetry: onRetry) {
         try captureDocumentsSnapshotOnce(
             documentsPath: documentsPath,
             snapshotPath: snapshotPath,
             afterCopy: afterCopy,
+            onProgress: onProgress,
             validate: validate
         )
     }
@@ -1772,16 +1803,26 @@ private func captureDocumentsSnapshotOnce(
     documentsPath: String,
     snapshotPath: String,
     afterCopy: (() -> Void)?,
-    validate: (String, String) throws -> Bool
+    onProgress: ((String, Double) -> Void)?,
+    validate: ((String, String) throws -> Bool)?
 ) throws {
     let fm = FileManager.default
     try fm.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
     let destination = (snapshotPath as NSString).appendingPathComponent("Documents")
+    let progress = SnapshotTransferProgress(operation: .capture, report: onProgress)
     do {
-        let before = try fileTreeEntries(at: documentsPath, hashContents: false)
-        try fm.copyItem(atPath: documentsPath, toPath: destination)
+        let before = try fileTreeEntries(at: documentsPath, hashContents: false, onEntry: { entry in
+            progress.noteInventoryEntry(byteSize: listedByteSize(entry))
+        })
+        progress.finishInventory()
+        let sizes = Dictionary(uniqueKeysWithValues: before.map { ($0.relativePath, listedByteSize($0)) })
+        try copyTreePreservingMetadata(from: documentsPath, to: destination, sizes: sizes, progress: progress)
+        progress.finishCopy()
         afterCopy?()
-        let after = try fileTreeEntries(at: documentsPath, hashContents: false)
+        let after = try fileTreeEntries(at: documentsPath, hashContents: false, onEntry: { _ in
+            progress.noteStabilityEntry()
+        })
+        progress.finishStability()
         guard before == after else {
             throw SnapshotFileFailure.changedDuringCopy
         }
@@ -1789,10 +1830,11 @@ private func captureDocumentsSnapshotOnce(
         guard fm.fileExists(atPath: destination, isDirectory: &destinationIsDirectory), destinationIsDirectory.boolValue else {
             throw SnapshotFileFailure.validationFailed
         }
-        let matches = try validate(documentsPath, destination)
-        if !matches {
+        let matches = try snapshotCopyMatches(sourcePath: documentsPath, copyPath: destination, progress: progress, validate: validate)
+        guard matches else {
             throw SnapshotFileFailure.validationFailed
         }
+        progress.finish()
     } catch {
         if fm.fileExists(atPath: snapshotPath) {
             try? fm.removeItem(atPath: snapshotPath)
@@ -1808,14 +1850,16 @@ func restoreDocumentsReplacingLiveCopy(
     maxAttempts: Int = snapshotTransientRetryLimit,
     retryDelay: TimeInterval = snapshotTransientRetryDelay,
     sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+    onProgress: ((String, Double) -> Void)? = nil,
     onRetry: ((Int, Error) -> Void)? = nil,
-    validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+    validate: ((String, String) throws -> Bool)? = nil
 ) throws {
     try retryingTransientSnapshot(maxAttempts: maxAttempts, retryDelay: retryDelay, sleep: sleep, onRetry: onRetry) {
         try restoreDocumentsReplacingLiveCopyOnce(
             snapshotDocumentsPath: snapshotDocumentsPath,
             documentsPath: documentsPath,
             simulatorRoot: simulatorRoot,
+            onProgress: onProgress,
             validate: validate
         )
     }
@@ -1825,7 +1869,8 @@ private func restoreDocumentsReplacingLiveCopyOnce(
     snapshotDocumentsPath: String,
     documentsPath: String,
     simulatorRoot: String,
-    validate: (String, String) throws -> Bool
+    onProgress: ((String, Double) -> Void)?,
+    validate: ((String, String) throws -> Bool)?
 ) throws {
     guard isSafeLiveDocumentsPath(documentsPath, simulatorRoot: simulatorRoot) else {
         throw SnapshotFileFailure.unsafeDocumentsPath
@@ -1836,11 +1881,21 @@ private func restoreDocumentsReplacingLiveCopyOnce(
     }
 
     let fm = FileManager.default
+    let progress = SnapshotTransferProgress(operation: .restore, report: onProgress)
+    var sizes: [String: Int64] = [:]
+    _ = try fileTreeEntries(at: snapshotDocumentsPath, hashContents: false, onEntry: { entry in
+        let size = listedByteSize(entry)
+        sizes[entry.relativePath] = size
+        progress.noteInventoryEntry(byteSize: size)
+    })
+    progress.finishInventory()
+
     let parent = (documentsPath as NSString).deletingLastPathComponent
     let backupPath = (parent as NSString).appendingPathComponent(".simmer-documents-backup-\(UUID().uuidString)")
     let hadDocuments = fm.fileExists(atPath: documentsPath)
 
     if hadDocuments {
+        progress.noteReplacingDocuments()
         try fm.moveItem(atPath: documentsPath, toPath: backupPath)
     }
 
@@ -1854,9 +1909,15 @@ private func restoreDocumentsReplacingLiveCopyOnce(
     }
 
     do {
-        try fm.copyItem(atPath: snapshotDocumentsPath, toPath: documentsPath)
-        let matches = try validate(snapshotDocumentsPath, documentsPath)
-        if !matches {
+        try copyTreePreservingMetadata(from: snapshotDocumentsPath, to: documentsPath, sizes: sizes, progress: progress)
+        progress.finishCopy()
+        let matches = try snapshotCopyMatches(
+            sourcePath: snapshotDocumentsPath,
+            copyPath: documentsPath,
+            progress: progress,
+            validate: validate
+        )
+        guard matches else {
             do {
                 try rollBack()
             } catch {
@@ -1864,6 +1925,7 @@ private func restoreDocumentsReplacingLiveCopyOnce(
             }
             throw SnapshotFileFailure.validationFailed
         }
+        progress.finish()
         if hadDocuments {
             try? fm.removeItem(atPath: backupPath)
         }
@@ -1877,4 +1939,366 @@ private func restoreDocumentsReplacingLiveCopyOnce(
         }
         throw error
     }
+}
+
+private func listedByteSize(_ entry: ListedFile) -> Int64 {
+    if case .file(let size, _, _) = entry.kind { return size }
+    return 0
+}
+
+private func snapshotCopyMatches(
+    sourcePath: String,
+    copyPath: String,
+    progress: SnapshotTransferProgress,
+    validate: ((String, String) throws -> Bool)?
+) throws -> Bool {
+    if let validate {
+        return try validate(sourcePath, copyPath)
+    }
+    progress.beginVerifyingOriginal()
+    return try copiedTreeMatches(
+        sourcePath: sourcePath,
+        copyPath: copyPath,
+        sourceBytes: { progress.noteVerifiedBytes($0) },
+        sourceEntry: { _ in progress.noteVerifiedEntry() },
+        copyBytes: { progress.noteVerifiedBytes($0) },
+        copyEntry: { _ in progress.noteVerifiedEntry() },
+        beforeCopyWalk: { progress.beginVerifyingCopy() }
+    )
+}
+
+/// Tracks snapshot copy and verification as one 0...1 fraction.
+///
+/// A same-volume copy is often an APFS clone and finishes immediately. The long
+/// part is reading every byte back to prove the copy matches, so that read is
+/// most of the bar. A real byte-for-byte copy still moves the bar while it writes,
+/// including through a single multi-gigabyte file.
+final class SnapshotTransferProgress {
+    enum Operation {
+        case capture
+        case restore
+    }
+
+    private let operation: Operation
+    private let report: ((String, Double) -> Void)?
+    private let entryCredit: Int64 = 64 * 1024
+    private let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+    private let countFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
+
+    private enum Phase {
+        case counting
+        case copying
+        case checking
+        case verifying
+    }
+
+    private var phase: Phase = .counting
+    private var messageOverride: String?
+    private var inventoryClosed = false
+    private var inventoryEntries = 0
+    private var inventoryBytes: Int64 = 0
+    private var totalEntries = 0
+    private var totalBytes: Int64 = 0
+
+    private var committedBytes: Int64 = 0
+    private var committedEntries = 0
+    private var inFlightBytes: Int64 = 0
+
+    private var stabilityDone = 0
+    private var verifyBytes: Int64 = 0
+    private var verifyEntries = 0
+    private var verifyTreeBytes: Int64 = 0
+    private var verifyTreeEntries = 0
+    private var verificationPass = 1
+
+    private var completedFractionOverride: Double?
+    private var highWater: Double = 0
+    private var lastReport = Date.distantPast
+
+    init(operation: Operation, report: ((String, Double) -> Void)?) {
+        self.operation = operation
+        self.report = report
+    }
+
+    var fraction: Double {
+        if let completedFractionOverride { return completedFractionOverride }
+        let total = totalWork
+        guard inventoryClosed, total > 0 else { return highWater }
+        let raw = min(1, Double(min(total, completedWork)) / Double(total))
+        if raw > highWater { highWater = raw }
+        return highWater
+    }
+
+    func noteInventoryEntry(byteSize: Int64) {
+        inventoryEntries += 1
+        inventoryBytes += max(0, byteSize)
+        publish(force: inventoryEntries == 1)
+    }
+
+    func finishInventory() {
+        totalEntries = inventoryEntries
+        totalBytes = inventoryBytes
+        inventoryClosed = true
+        phase = .copying
+        publish(force: true)
+    }
+
+    func noteReplacingDocuments() {
+        messageOverride = "Replacing documents..."
+        publish(force: true)
+    }
+
+    func noteCopyProgress(copiedBytes: Int64, fileSize: Int64) {
+        messageOverride = nil
+        guard fileSize > 0 else { return }
+        let copied = max(copiedBytes, 0)
+        if copied < inFlightBytes { inFlightBytes = 0 }
+        let limited = min(copied, fileSize)
+        if limited > inFlightBytes { inFlightBytes = limited }
+        publish()
+    }
+
+    func noteCopyFinished(fileSize: Int64) {
+        messageOverride = nil
+        committedBytes += max(fileSize, 0)
+        committedEntries += 1
+        inFlightBytes = 0
+        publish()
+    }
+
+    func finishCopy() {
+        messageOverride = nil
+        committedBytes = max(committedBytes, totalBytes)
+        committedEntries = max(committedEntries, totalEntries)
+        inFlightBytes = 0
+        publish(force: true)
+    }
+
+    func noteStabilityEntry() {
+        guard operation == .capture else { return }
+        phase = .checking
+        stabilityDone += 1
+        publish()
+    }
+
+    func finishStability() {
+        guard operation == .capture else { return }
+        phase = .checking
+        if stabilityDone < totalEntries { stabilityDone = totalEntries }
+        publish(force: true)
+    }
+
+    func beginVerifyingOriginal() {
+        messageOverride = nil
+        phase = .verifying
+        verificationPass = 1
+        verifyTreeBytes = 0
+        verifyTreeEntries = 0
+        publish(force: true)
+    }
+
+    func beginVerifyingCopy() {
+        messageOverride = nil
+        phase = .verifying
+        verificationPass = 2
+        verifyTreeBytes = 0
+        verifyTreeEntries = 0
+        publish(force: true)
+    }
+
+    func noteVerifiedBytes(_ count: Int64) {
+        let bytes = max(0, count)
+        verifyBytes += bytes
+        verifyTreeBytes += bytes
+        publish()
+    }
+
+    func noteVerifiedEntry() {
+        verifyEntries += 1
+        verifyTreeEntries += 1
+        publish()
+    }
+
+    func finish() {
+        completedFractionOverride = 1
+        publish(force: true)
+    }
+
+    private var copyBudget: Int64 { totalBytes + Int64(totalEntries) * entryCredit }
+    private var stabilityBudget: Int64 {
+        operation == .capture ? Int64(totalEntries) * entryCredit : 0
+    }
+    private var verifyBudget: Int64 { (totalBytes + Int64(totalEntries) * entryCredit) * 2 }
+    private var totalWork: Int64 { copyBudget + stabilityBudget + verifyBudget }
+
+    private var completedWork: Int64 {
+        let copyBytes = min(totalBytes, committedBytes + inFlightBytes)
+        let copy = min(copyBudget, copyBytes + Int64(committedEntries) * entryCredit)
+        let stability = min(stabilityBudget, Int64(stabilityDone) * entryCredit)
+        let verify = min(verifyBudget, verifyBytes + Int64(verifyEntries) * entryCredit)
+        return copy + stability + verify
+    }
+
+    private var message: String {
+        if let messageOverride { return messageOverride }
+        switch phase {
+        case .counting:
+            return "Counting files... \(formatCount(inventoryEntries))"
+        case .copying:
+            let action = operation == .capture ? "Copying documents" : "Restoring documents"
+            return detail(action: action, bytesDone: min(totalBytes, committedBytes + inFlightBytes), itemsDone: committedEntries)
+        case .checking:
+            if totalEntries == 0 { return "Checking files haven't changed..." }
+            return "Checking files haven't changed... \(formatCount(min(stabilityDone, totalEntries))) of \(formatCount(totalEntries))"
+        case .verifying:
+            return detail(action: verificationTitle, bytesDone: min(totalBytes, verifyTreeBytes), itemsDone: verifyTreeEntries)
+        }
+    }
+
+    private var verificationTitle: String {
+        switch (operation, verificationPass) {
+        case (.capture, 2):
+            return "Verifying snapshot"
+        case (.capture, _):
+            return "Verifying original"
+        case (.restore, 2):
+            return "Verifying restored documents"
+        case (.restore, _):
+            return "Verifying snapshot"
+        }
+    }
+
+    private func detail(action: String, bytesDone: Int64, itemsDone: Int) -> String {
+        if totalBytes >= 1_000_000 {
+            let bytes = "\(formatBytes(bytesDone)) of \(formatBytes(totalBytes))"
+            if totalEntries >= 100 {
+                return "\(action)... \(bytes) · \(formatCount(min(itemsDone, totalEntries))) of \(formatCount(totalEntries))"
+            }
+            return "\(action)... \(bytes)"
+        }
+        if totalEntries > 0 {
+            return "\(action)... \(formatCount(min(itemsDone, totalEntries))) of \(formatCount(totalEntries))"
+        }
+        return "\(action)..."
+    }
+
+    private func publish(force: Bool = false) {
+        let fraction = self.fraction
+        guard let report else { return }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastReport) < 0.1 { return }
+        lastReport = now
+        report(message, fraction)
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes <= 0 { return "0 KB" }
+        return byteFormatter.string(fromByteCount: bytes)
+    }
+
+    private func formatCount(_ value: Int) -> String {
+        countFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
+
+private final class SnapshotCopyContext {
+    let sourceRoot: String
+    let sizes: [String: Int64]
+    var errnoCode: Int32 = 0
+    var currentRelativePath: String?
+    var finished: Set<String> = []
+    let onProgress: (Int64, Int64) -> Void
+    let onFinished: (Int64) -> Void
+
+    init(sourceRoot: String, sizes: [String: Int64], onProgress: @escaping (Int64, Int64) -> Void, onFinished: @escaping (Int64) -> Void) {
+        self.sourceRoot = sourceRoot
+        self.sizes = sizes
+        self.onProgress = onProgress
+        self.onFinished = onFinished
+    }
+
+    func relativePath(of fullPath: String) -> String? {
+        if fullPath == sourceRoot { return nil }
+        let prefix = sourceRoot + "/"
+        guard fullPath.hasPrefix(prefix) else { return nil }
+        return String(fullPath.dropFirst(prefix.count))
+    }
+}
+
+private let snapshotCopyStatusCallback: copyfile_callback_t = { what, stage, state, src, dst, ctx in
+    guard let ctx else { return Int32(COPYFILE_CONTINUE) }
+    let context = Unmanaged<SnapshotCopyContext>.fromOpaque(ctx).takeUnretainedValue()
+    if stage == Int32(COPYFILE_ERR) {
+        if context.errnoCode == 0 { context.errnoCode = errno }
+        return Int32(COPYFILE_QUIT)
+    }
+    let fullPath = src.map { String(cString: $0) }
+    let isEntry = what == Int32(COPYFILE_RECURSE_FILE) || what == Int32(COPYFILE_RECURSE_DIR)
+    if stage == Int32(COPYFILE_START), isEntry {
+        context.currentRelativePath = fullPath.flatMap { context.relativePath(of: $0) }
+    }
+    if what == Int32(COPYFILE_COPY_DATA), stage == Int32(COPYFILE_PROGRESS), let relative = context.currentRelativePath {
+        var copied: off_t = 0
+        if let state {
+            copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &copied)
+        }
+        let size = context.sizes[relative] ?? Int64(copied)
+        context.onProgress(Int64(copied), size)
+    }
+    if stage == Int32(COPYFILE_FINISH), isEntry {
+        if let fullPath, let relative = context.relativePath(of: fullPath), context.finished.insert(relative).inserted {
+            context.onFinished(context.sizes[relative] ?? 0)
+        }
+        context.currentRelativePath = nil
+    }
+    return Int32(COPYFILE_CONTINUE)
+}
+
+private func copyTreePreservingMetadata(
+    from source: String,
+    to destination: String,
+    sizes: [String: Int64],
+    progress: SnapshotTransferProgress
+) throws {
+    let context = SnapshotCopyContext(
+        sourceRoot: source,
+        sizes: sizes,
+        onProgress: { copied, fileSize in
+            progress.noteCopyProgress(copiedBytes: copied, fileSize: fileSize)
+        },
+        onFinished: { fileSize in
+            progress.noteCopyFinished(fileSize: fileSize)
+        }
+    )
+    guard let state = copyfile_state_alloc() else {
+        throw snapshotPOSIXError(ENOMEM)
+    }
+    defer { copyfile_state_free(state) }
+    let callback: copyfile_callback_t = snapshotCopyStatusCallback
+    let status = copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(callback, to: UnsafeRawPointer.self))
+    let contextStatus = copyfile_state_set(state, UInt32(COPYFILE_STATE_STATUS_CTX), Unmanaged.passUnretained(context).toOpaque())
+    guard status == 0, contextStatus == 0 else {
+        throw snapshotPOSIXError(errno == 0 ? EINVAL : errno)
+    }
+    let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_NOFOLLOW | COPYFILE_CLONE | COPYFILE_EXCL)
+    if copyfile(source, destination, state, flags) < 0 {
+        let code = context.errnoCode != 0 ? context.errnoCode : errno
+        throw snapshotPOSIXError(code == 0 ? EIO : code)
+    }
+}
+
+private func snapshotPOSIXError(_ code: Int32) -> NSError {
+    NSError(
+        domain: NSPOSIXErrorDomain,
+        code: Int(code),
+        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(code))]
+    )
 }
