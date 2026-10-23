@@ -163,35 +163,38 @@ struct ContentView: View {
                     }
                 }
                 
-                // Progress Bar Overlay for Snapshot Operations
+                // Progress overlay. The fill sits over the list so clicks cannot reach Take Snapshot while it runs.
             if simulatorService.isSnapshotOperationInProgress {
-                VStack {
-                    Spacer()
-                    
+                ZStack(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.001))
+                        .contentShape(Rectangle())
+                        .onTapGesture {}
+
                     VStack(spacing: 4) {
                         Text(simulatorService.snapshotOperationMessage)
                             .font(.system(size: 11))
-                            .foregroundColor(.white)
+                            .foregroundColor(simulatorService.snapshotOperationFailed ? Color.orange : .white)
                             .multilineTextAlignment(.center)
-                        
-                        ProgressView(value: simulatorService.snapshotOperationProgress)
-                            .progressViewStyle(LinearProgressViewStyle(tint: .blue))
-                            .scaleEffect(y: 0.8)
-                        
-                        Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
-                            .font(.system(size: 11))
-                            .foregroundColor(.white.opacity(0.8))
+
+                        if !simulatorService.snapshotOperationFailed {
+                            ProgressView(value: simulatorService.snapshotOperationProgress)
+                                .progressViewStyle(LinearProgressViewStyle(tint: .blue))
+                                .scaleEffect(y: 0.8)
+
+                            Text("\(Int(simulatorService.snapshotOperationProgress * 100))%")
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.8))
+                        }
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(
                         VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                     )
-//                    .cornerRadius(12)
                     .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
                 .allowsHitTesting(true)
                 .transition(.asymmetric(
                     insertion: .move(edge: .bottom).combined(with: .opacity),
@@ -410,17 +413,19 @@ struct AppActionsView: View {
             
             // Document Snapshots
             VStack(spacing: 0) {
+                let snapshotBusy = simulatorService.isSnapshotOperationInProgress
                 Button(action: {
+                    guard !simulatorService.isSnapshotOperationInProgress else { return }
                     simulatorService.takeSnapshot(for: app)
                 }) {
                     HStack {
                         Image(systemName: "camera")
-                            .foregroundColor(.green)
+                            .foregroundColor(snapshotBusy ? .secondary : .green)
                             .frame(width: 20)
                         
                         Text("Take Documents Snapshot")
                             .font(.system(size: 12))
-                            .foregroundColor(.primary)
+                            .foregroundColor(snapshotBusy ? .secondary : .primary)
                         
                         Spacer()
                     }
@@ -429,6 +434,7 @@ struct AppActionsView: View {
                     .padding(.leading, 40)
                 }
                 .buttonStyle(PlainButtonStyle())
+                .disabled(snapshotBusy)
                 
                 // Existing snapshots
                 ForEach(simulatorService.snapshots) { snapshot in

@@ -71,7 +71,13 @@ extension SimulatorService: MCPBackend {
                 try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
             }
             showSnapshotProgress("Copying documents...", progress: 0.4)
-            try captureDocumentsSnapshot(documentsPath: app.documentsPath, snapshotPath: snapshotPath)
+            try captureDocumentsSnapshot(
+                documentsPath: app.documentsPath,
+                snapshotPath: snapshotPath,
+                onRetry: { _, error in
+                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying snapshot...", progress: 0.4)
+                }
+            )
             if !trimmedName.isEmpty {
                 let metadata = SnapshotMetadata(displayName: trimmedName)
                 let encoder = JSONEncoder()
@@ -82,8 +88,9 @@ extension SimulatorService: MCPBackend {
         } catch {
             try? FileManager.default.removeItem(atPath: snapshotPath)
             blockFurtherSnapshots(for: 4)
-            showSnapshotProgress("Snapshot failed: \(error.localizedDescription)", progress: 1, dismissAfter: 4)
-            throw MCPBackendError(message: "Snapshot failed: \(error.localizedDescription)")
+            let message = "Snapshot failed: \(error.localizedDescription) No snapshot was saved."
+            showSnapshotProgress(message, progress: 0, dismissAfter: 4, failed: true)
+            throw MCPBackendError(message: message)
         }
 
         showSnapshotProgress("Snapshot created successfully!", progress: 1, dismissAfter: 1)
@@ -130,12 +137,16 @@ extension SimulatorService: MCPBackend {
             try restoreDocumentsReplacingLiveCopy(
                 snapshotDocumentsPath: snapshotDocuments,
                 documentsPath: app.documentsPath,
-                simulatorRoot: device.dataPath
+                simulatorRoot: device.dataPath,
+                onRetry: { _, error in
+                    self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying restore...", progress: 0.4)
+                }
             )
         } catch {
             blockFurtherSnapshots(for: 4)
-            showSnapshotProgress(error.localizedDescription, progress: 1, dismissAfter: 4)
-            throw MCPBackendError(message: error.localizedDescription)
+            let message = restoreFailureMessage(error)
+            showSnapshotProgress(message, progress: 0, dismissAfter: 4, failed: true)
+            throw MCPBackendError(message: message)
         }
 
         showSnapshotProgress("Snapshot restored successfully!", progress: 1, dismissAfter: 1)
@@ -231,17 +242,19 @@ extension SimulatorService: MCPBackend {
         return records.sorted { $0.date > $1.date }
     }
 
-    private func showSnapshotProgress(_ message: String, progress: Double, dismissAfter: TimeInterval? = nil) {
+    private func showSnapshotProgress(_ message: String, progress: Double, dismissAfter: TimeInterval? = nil, failed: Bool = false) {
         DispatchQueue.main.async {
             self.isSnapshotOperationInProgress = true
+            self.snapshotOperationFailed = failed
             self.snapshotOperationProgress = progress
             self.snapshotOperationMessage = message
             guard let dismissAfter else { return }
-            if dismissAfter <= 1.5 {
+            if dismissAfter <= 1.5 && !failed {
                 self.isSnapshotOperationInProgress = false
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + dismissAfter) {
                 self.isSnapshotOperationInProgress = false
+                self.snapshotOperationFailed = false
                 self.snapshotOperationProgress = 0
                 self.snapshotOperationMessage = ""
             }

@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import CryptoKit
 import os.log
 
 enum PushSendOutcome {
@@ -59,6 +60,7 @@ class SimulatorService: ObservableObject {
     @Published var totalSnapshotsSize: Int64 = 0
     @Published var isLoadingTotalSnapshotsSize: Bool = false
     @Published var isSnapshotOperationInProgress: Bool = false
+    @Published var snapshotOperationFailed: Bool = false
     @Published var snapshotOperationProgress: Double = 0.0
     @Published var snapshotOperationMessage: String = ""
     @Published var pushHistoryChangeTick: Int = 0
@@ -936,13 +938,27 @@ class SimulatorService: ObservableObject {
     private func reportSnapshotFailure(_ message: String) {
         blockFurtherSnapshots(for: 4)
         isSnapshotOperationInProgress = true
-        snapshotOperationProgress = 1
+        snapshotOperationFailed = true
+        snapshotOperationProgress = 0
         snapshotOperationMessage = message
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            self.isSnapshotOperationInProgress = false
-            self.snapshotOperationProgress = 0
-            self.snapshotOperationMessage = ""
+            self.clearSnapshotOperationStatus()
         }
+    }
+
+    /// Clears the progress UI without releasing the snapshot lock.
+    private func clearSnapshotOperationStatus() {
+        isSnapshotOperationInProgress = false
+        snapshotOperationFailed = false
+        snapshotOperationProgress = 0
+        snapshotOperationMessage = ""
+    }
+
+    /// Clears the progress UI and releases the operation claimed by `tryBeginSnapshotOperation`.
+    /// Call only after the background work has kept that claim.
+    private func endVisibleSnapshotOperation() {
+        clearSnapshotOperationStatus()
+        endSnapshotOperation()
     }
     
     // MARK: - Updated Functions with Path Validation
@@ -1011,6 +1027,10 @@ class SimulatorService: ObservableObject {
         guard tryBeginSnapshotOperation() else { return }
         var handedOff = false
         defer { if !handedOff { endSnapshotOperation() } }
+        isSnapshotOperationInProgress = true
+        snapshotOperationFailed = false
+        snapshotOperationProgress = 0
+        snapshotOperationMessage = "Preparing snapshot..."
         guard let validatedApp = liveApp(app) else {
             log("Documents container invalid for \(app.name), cannot take snapshot", type: .error)
             reportSnapshotFailure("Couldn't find this app's container, so no snapshot was taken.")
@@ -1030,15 +1050,11 @@ class SimulatorService: ObservableObject {
         let snapshotPath = (validatedApp.snapshotsPath as NSString).appendingPathComponent(snapshotName)
 
         log("Taking snapshot for \(validatedApp.name) at \(snapshotPath)")
-        isSnapshotOperationInProgress = true
-        snapshotOperationProgress = 0
-        snapshotOperationMessage = "Preparing snapshot..."
         beginCriticalFileOperation()
         handedOff = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
-                self.endSnapshotOperation()
                 DispatchQueue.main.async { self.endCriticalFileOperation() }
             }
             do {
@@ -1049,27 +1065,36 @@ class SimulatorService: ObservableObject {
                     self.snapshotOperationProgress = 0.4
                     self.snapshotOperationMessage = "Copying documents..."
                 }
-                try captureDocumentsSnapshot(documentsPath: validatedApp.documentsPath, snapshotPath: snapshotPath)
+                try captureDocumentsSnapshot(
+                    documentsPath: validatedApp.documentsPath,
+                    snapshotPath: snapshotPath,
+                    onRetry: { attempt, error in
+                        DispatchQueue.main.async {
+                            self.snapshotOperationFailed = false
+                            self.snapshotOperationProgress = 0.4
+                            self.snapshotOperationMessage = "Temporary problem (\(error.localizedDescription)). Retrying snapshot..."
+                        }
+                        self.log("Snapshot attempt \(attempt) failed: \(error). Retrying.")
+                    }
+                )
                 DispatchQueue.main.async {
                     self.loadSnapshots(for: validatedApp)
+                    self.snapshotOperationFailed = false
                     self.snapshotOperationProgress = 1
                     self.snapshotOperationMessage = "Snapshot created successfully!"
-                    self.isSnapshotOperationInProgress = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        self.snapshotOperationProgress = 0
-                        self.snapshotOperationMessage = ""
+                        self.endVisibleSnapshotOperation()
                     }
                 }
                 self.log("Snapshot created successfully: \(snapshotName)")
             } catch {
                 self.blockFurtherSnapshots(for: 4)
                 DispatchQueue.main.async {
-                    self.snapshotOperationProgress = 1
-                    self.snapshotOperationMessage = "Snapshot failed: \(error.localizedDescription). Close the app if it has these files open, then try again."
+                    self.snapshotOperationFailed = true
+                    self.snapshotOperationProgress = 0
+                    self.snapshotOperationMessage = "Snapshot failed: \(error.localizedDescription) No snapshot was saved."
                     DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                        self.isSnapshotOperationInProgress = false
-                        self.snapshotOperationProgress = 0
-                        self.snapshotOperationMessage = ""
+                        self.endVisibleSnapshotOperation()
                     }
                 }
                 self.log("Error taking snapshot: \(error)", type: .error)
@@ -1098,6 +1123,7 @@ class SimulatorService: ObservableObject {
         }
 
         isSnapshotOperationInProgress = true
+        snapshotOperationFailed = false
         snapshotOperationProgress = 0
         snapshotOperationMessage = "Preparing to restore snapshot..."
         beginCriticalFileOperation()
@@ -1109,23 +1135,33 @@ class SimulatorService: ObservableObject {
                 DispatchQueue.main.async { self.endCriticalFileOperation() }
             }
             self.terminateRunningApp(validatedApp, on: simulator)
-            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: validatedApp, simulator: simulator, attempt: 1)
+            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: validatedApp, simulator: simulator)
         }
     }
 
-    private func performRestore(snapshotDocumentsPath: String, app: App, simulator: Simulator, attempt: Int) {
+    private func performRestore(snapshotDocumentsPath: String, app: App, simulator: Simulator) {
         DispatchQueue.main.async {
+            self.snapshotOperationFailed = false
             self.snapshotOperationProgress = 0.4
-            self.snapshotOperationMessage = attempt == 1 ? "Restoring snapshot..." : "Validation failed, retrying restore..."
+            self.snapshotOperationMessage = "Restoring snapshot..."
         }
         do {
             try restoreDocumentsReplacingLiveCopy(
                 snapshotDocumentsPath: snapshotDocumentsPath,
                 documentsPath: app.documentsPath,
-                simulatorRoot: simulator.dataPath
+                simulatorRoot: simulator.dataPath,
+                onRetry: { attempt, error in
+                    DispatchQueue.main.async {
+                        self.snapshotOperationFailed = false
+                        self.snapshotOperationProgress = 0.4
+                        self.snapshotOperationMessage = "Temporary problem (\(error.localizedDescription)). Retrying restore..."
+                    }
+                    self.log("Restore attempt \(attempt) failed: \(error). Retrying.")
+                }
             )
             DispatchQueue.main.async {
                 self.loadSnapshots(for: app)
+                self.snapshotOperationFailed = false
                 self.snapshotOperationProgress = 1
                 self.snapshotOperationMessage = "Snapshot restored successfully!"
                 self.isSnapshotOperationInProgress = false
@@ -1134,22 +1170,18 @@ class SimulatorService: ObservableObject {
                     self.snapshotOperationMessage = ""
                 }
             }
-            self.log("Snapshot restored successfully on attempt \(attempt)")
-        } catch SnapshotFileFailure.validationFailed where attempt < 2 {
-            self.log("Restore validation failed on attempt \(attempt). Original Documents were kept. Retrying...")
-            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: app, simulator: simulator, attempt: attempt + 1)
+            self.log("Snapshot restored successfully")
         } catch {
             self.blockFurtherSnapshots(for: 4)
             DispatchQueue.main.async {
-                self.snapshotOperationProgress = 1
-                self.snapshotOperationMessage = error.localizedDescription
+                self.snapshotOperationFailed = true
+                self.snapshotOperationProgress = 0
+                self.snapshotOperationMessage = restoreFailureMessage(error)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    self.isSnapshotOperationInProgress = false
-                    self.snapshotOperationProgress = 0
-                    self.snapshotOperationMessage = ""
+                    self.clearSnapshotOperationStatus()
                 }
             }
-            self.log("Error restoring snapshot on attempt \(attempt): \(error)", type: .error)
+            self.log("Error restoring snapshot: \(error)", type: .error)
         }
     }
 
@@ -1260,6 +1292,7 @@ class SimulatorService: ObservableObject {
         guard !snapshotsPath.isEmpty else { return }
 
         isSnapshotOperationInProgress = true
+        snapshotOperationFailed = false
         snapshotOperationProgress = 0.3
         snapshotOperationMessage = "Deleting snapshots for \(current.name)..."
         beginCriticalFileOperation()
@@ -1448,28 +1481,55 @@ class SimulatorService: ObservableObject {
 // MARK: - Snapshot file operations
 // Pure helpers so capture/restore can be tested without launching the app.
 
+let snapshotTransientRetryLimit = 3
+let snapshotTransientRetryDelay: TimeInterval = 1
+private let snapshotTreeDepthLimit = 64
+
 struct ListedFile: Equatable {
+    enum Kind: Equatable {
+        case directory
+        case file(size: Int64, modified: TimeInterval, contentHash: Data?)
+        case symlink(target: String)
+        case other
+    }
+
     let relativePath: String
-    let size: Int64
+    let kind: Kind
 }
 
 enum SnapshotFileFailure: Error, Equatable, LocalizedError {
     case missingSnapshotDocuments
     case unsafeDocumentsPath
     case validationFailed
+    case changedDuringCopy
+    case unreadableItem(String)
     case rollbackFailed(backupPath: String)
 
     var errorDescription: String? {
         switch self {
         case .missingSnapshotDocuments:
-            return "The snapshot does not contain a Documents folder"
+            return "The snapshot does not contain a Documents folder."
         case .unsafeDocumentsPath:
-            return "Refusing to replace a path that is not this simulator's Documents folder"
+            return "Refusing to replace a path that is not this simulator's Documents folder."
         case .validationFailed:
-            return "The copied files did not match the snapshot. The original Documents folder was kept."
+            return "The copied files did not match."
+        case .changedDuringCopy:
+            return "Documents changed while they were being copied."
+        case .unreadableItem(let relativePath):
+            return "Couldn't read \(relativePath)."
         case .rollbackFailed(let backupPath):
-            return "Restore failed and the previous Documents folder is still at \(backupPath)"
+            return "Restore failed and the previous Documents folder is still at \(backupPath)."
         }
+    }
+}
+
+struct SnapshotAttemptsExhausted: Error, LocalizedError {
+    let attempts: Int
+    let underlying: Error
+
+    var errorDescription: String? {
+        let detail = (underlying as? LocalizedError)?.errorDescription ?? underlying.localizedDescription
+        return "Still failing after \(attempts) attempts. \(detail)"
     }
 }
 
@@ -1542,54 +1602,195 @@ func isDeletableSnapshotDirectory(_ snapshotPath: String, snapshotsRoot: String,
     return parent == normSnapshots
 }
 
-func recursiveFileInfos(at path: String) throws -> [ListedFile] {
+func isTransientSnapshotError(_ error: Error) -> Bool {
+    if error is SnapshotAttemptsExhausted { return false }
+    if let failure = error as? SnapshotFileFailure {
+        switch failure {
+        case .validationFailed, .changedDuringCopy, .unreadableItem:
+            return true
+        case .missingSnapshotDocuments, .unsafeDocumentsPath, .rollbackFailed:
+            return false
+        }
+    }
+    let nsError = error as NSError
+    if nsError.domain == NSPOSIXErrorDomain {
+        let transient: Set<Int32> = [EINTR, EAGAIN, EBUSY, ETXTBSY, EDEADLK, ENOLCK, ETIMEDOUT, EIO, ENOENT]
+        if transient.contains(Int32(nsError.code)) { return true }
+    }
+    if nsError.domain == NSCocoaErrorDomain {
+        // Unknown, missing, permission, and "file exists" errors are often a file the app still has open.
+        let transient: Set<Int> = [4, 256, 257, 260, 512, 513, 516]
+        if transient.contains(nsError.code) { return true }
+    }
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+        return isTransientSnapshotError(underlying)
+    }
+    return false
+}
+
+func restoreFailureMessage(_ error: Error) -> String {
+    if let failure = error as? SnapshotFileFailure, case .rollbackFailed = failure {
+        return failure.localizedDescription
+    }
+    return "\(error.localizedDescription) The original Documents folder was kept."
+}
+
+func retryingTransientSnapshot<T>(
+    maxAttempts: Int = snapshotTransientRetryLimit,
+    retryDelay: TimeInterval = snapshotTransientRetryDelay,
+    sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+    onRetry: ((Int, Error) -> Void)? = nil,
+    _ operation: () throws -> T
+) throws -> T {
+    let attempts = max(1, maxAttempts)
+    var lastError: Error?
+    for attempt in 1...attempts {
+        do {
+            return try operation()
+        } catch {
+            lastError = error
+            if attempt == attempts || !isTransientSnapshotError(error) {
+                if attempt > 1 {
+                    throw SnapshotAttemptsExhausted(attempts: attempt, underlying: error)
+                }
+                throw error
+            }
+            onRetry?(attempt, error)
+            if retryDelay > 0 {
+                sleep(retryDelay)
+            }
+        }
+    }
+    throw lastError ?? SnapshotFileFailure.validationFailed
+}
+
+private func hashFileContents(at path: String) throws -> Data {
+    let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+        let chunk = try handle.read(upToCount: 1024 * 1024)
+        guard let chunk, !chunk.isEmpty else { break }
+        hasher.update(data: chunk)
+    }
+    return Data(hasher.finalize())
+}
+
+/// Lists every entry under `path`. A name that cannot be inspected throws.
+/// Skipping it would let a partial copy look identical to the source.
+func fileTreeEntries(at path: String, hashContents: Bool) throws -> [ListedFile] {
     var files: [ListedFile] = []
-    func enumerate(at currentPath: String, relativePath: String) throws {
+    func enumerate(at currentPath: String, relativePath: String, depth: Int) throws {
+        if depth > snapshotTreeDepthLimit {
+            throw SnapshotFileFailure.unreadableItem(relativePath.isEmpty ? path : relativePath)
+        }
         let contents = try FileManager.default.contentsOfDirectory(atPath: currentPath)
         for item in contents {
             let fullPath = (currentPath as NSString).appendingPathComponent(item)
             let itemRelative = relativePath.isEmpty ? item : (relativePath as NSString).appendingPathComponent(item)
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
-                if isDirectory.boolValue {
-                    try enumerate(at: fullPath, relativePath: itemRelative)
-                } else {
-                    let attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
-                    let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-                    files.append(ListedFile(relativePath: itemRelative, size: size))
+            let attributes: [FileAttributeKey: Any]
+            do {
+                attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
+            } catch {
+                throw SnapshotFileFailure.unreadableItem(itemRelative)
+            }
+            let type = attributes[.type] as? FileAttributeType
+            if type == .typeSymbolicLink {
+                let target: String
+                do {
+                    target = try FileManager.default.destinationOfSymbolicLink(atPath: fullPath)
+                } catch {
+                    throw SnapshotFileFailure.unreadableItem(itemRelative)
                 }
+                files.append(ListedFile(relativePath: itemRelative, kind: .symlink(target: target)))
+            } else if type == .typeDirectory {
+                files.append(ListedFile(relativePath: itemRelative, kind: .directory))
+                try enumerate(at: fullPath, relativePath: itemRelative, depth: depth + 1)
+            } else if type == .typeRegular {
+                let hash: Data?
+                if hashContents {
+                    do {
+                        hash = try hashFileContents(at: fullPath)
+                    } catch {
+                        throw SnapshotFileFailure.unreadableItem(itemRelative)
+                    }
+                } else {
+                    hash = nil
+                }
+                let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+                let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                files.append(ListedFile(
+                    relativePath: itemRelative,
+                    kind: .file(size: size, modified: modified, contentHash: hash)
+                ))
+            } else {
+                files.append(ListedFile(relativePath: itemRelative, kind: .other))
             }
         }
     }
-    try enumerate(at: path, relativePath: "")
+    try enumerate(at: path, relativePath: "", depth: 0)
     return files.sorted { $0.relativePath < $1.relativePath }
 }
 
-func copiedTreeMatches(sourcePath: String, copyPath: String) throws -> Bool {
-    let sourceFiles = try recursiveFileInfos(at: sourcePath)
-    let copiedFiles = try recursiveFileInfos(at: copyPath)
-    guard sourceFiles.count == copiedFiles.count else { return false }
-    for pair in zip(sourceFiles, copiedFiles) {
-        if pair.0.relativePath != pair.1.relativePath || pair.0.size != pair.1.size {
-            return false
-        }
+private func ignoringTimestamps(_ files: [ListedFile]) -> [ListedFile] {
+    files.map { file in
+        guard case .file(let size, _, let contentHash) = file.kind else { return file }
+        return ListedFile(
+            relativePath: file.relativePath,
+            kind: .file(size: size, modified: 0, contentHash: contentHash)
+        )
     }
-    return true
+}
+
+func copiedTreeMatches(sourcePath: String, copyPath: String) throws -> Bool {
+    let sourceFiles = try fileTreeEntries(at: sourcePath, hashContents: true)
+    let copiedFiles = try fileTreeEntries(at: copyPath, hashContents: true)
+    return ignoringTimestamps(sourceFiles) == ignoringTimestamps(copiedFiles)
 }
 
 func captureDocumentsSnapshot(
     documentsPath: String,
     snapshotPath: String,
+    maxAttempts: Int = snapshotTransientRetryLimit,
+    retryDelay: TimeInterval = snapshotTransientRetryDelay,
+    sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+    afterCopy: (() -> Void)? = nil,
+    onRetry: ((Int, Error) -> Void)? = nil,
     validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+) throws {
+    try retryingTransientSnapshot(maxAttempts: maxAttempts, retryDelay: retryDelay, sleep: sleep, onRetry: onRetry) {
+        try captureDocumentsSnapshotOnce(
+            documentsPath: documentsPath,
+            snapshotPath: snapshotPath,
+            afterCopy: afterCopy,
+            validate: validate
+        )
+    }
+}
+
+private func captureDocumentsSnapshotOnce(
+    documentsPath: String,
+    snapshotPath: String,
+    afterCopy: (() -> Void)?,
+    validate: (String, String) throws -> Bool
 ) throws {
     let fm = FileManager.default
     try fm.createDirectory(atPath: snapshotPath, withIntermediateDirectories: true)
     let destination = (snapshotPath as NSString).appendingPathComponent("Documents")
     do {
+        let before = try fileTreeEntries(at: documentsPath, hashContents: false)
         try fm.copyItem(atPath: documentsPath, toPath: destination)
+        afterCopy?()
+        let after = try fileTreeEntries(at: documentsPath, hashContents: false)
+        guard before == after else {
+            throw SnapshotFileFailure.changedDuringCopy
+        }
+        var destinationIsDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: destination, isDirectory: &destinationIsDirectory), destinationIsDirectory.boolValue else {
+            throw SnapshotFileFailure.validationFailed
+        }
         let matches = try validate(documentsPath, destination)
         if !matches {
-            try? fm.removeItem(atPath: snapshotPath)
             throw SnapshotFileFailure.validationFailed
         }
     } catch {
@@ -1604,7 +1805,27 @@ func restoreDocumentsReplacingLiveCopy(
     snapshotDocumentsPath: String,
     documentsPath: String,
     simulatorRoot: String,
+    maxAttempts: Int = snapshotTransientRetryLimit,
+    retryDelay: TimeInterval = snapshotTransientRetryDelay,
+    sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+    onRetry: ((Int, Error) -> Void)? = nil,
     validate: (String, String) throws -> Bool = { try copiedTreeMatches(sourcePath: $0, copyPath: $1) }
+) throws {
+    try retryingTransientSnapshot(maxAttempts: maxAttempts, retryDelay: retryDelay, sleep: sleep, onRetry: onRetry) {
+        try restoreDocumentsReplacingLiveCopyOnce(
+            snapshotDocumentsPath: snapshotDocumentsPath,
+            documentsPath: documentsPath,
+            simulatorRoot: simulatorRoot,
+            validate: validate
+        )
+    }
+}
+
+private func restoreDocumentsReplacingLiveCopyOnce(
+    snapshotDocumentsPath: String,
+    documentsPath: String,
+    simulatorRoot: String,
+    validate: (String, String) throws -> Bool
 ) throws {
     guard isSafeLiveDocumentsPath(documentsPath, simulatorRoot: simulatorRoot) else {
         throw SnapshotFileFailure.unsafeDocumentsPath
