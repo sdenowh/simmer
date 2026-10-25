@@ -74,6 +74,7 @@ class SimulatorService: ObservableObject {
     private let criticalOperationReason = "Simmer snapshot operation"
     private let snapshotLock = NSLock()
     private var snapshotBlockedUntil: Date?
+    private var simulatorControlKeys: Set<String> = []
     
     init() {
         loadSimulators()
@@ -922,6 +923,100 @@ class SimulatorService: ObservableObject {
         ProcessInfo.processInfo.enableSuddenTermination()
     }
 
+    // MARK: - Boot and launch
+
+    /// Boots the simulator if it is shut down, then brings Simulator to the front on that device.
+    func openInSimulator(_ simulator: Simulator) {
+        startSimulatorControl(simulator, bundleIdentifier: nil)
+    }
+
+    /// Launches the app. Boots the simulator and opens Simulator first when the device is shut down.
+    func launch(_ app: App, on simulator: Simulator) {
+        startSimulatorControl(simulator, bundleIdentifier: app.bundleIdentifier)
+    }
+
+    private func startSimulatorControl(_ simulator: Simulator, bundleIdentifier: String?) {
+        if isSnapshotOperationInProgress {
+            deliverBanner("Wait for the snapshot to finish, then try again.")
+            return
+        }
+        if useMockData {
+            deliverBanner("Turn off mock data to open a simulator.")
+            return
+        }
+        let key = simulatorControlKey(udid: simulator.udid, bundleIdentifier: bundleIdentifier)
+        guard simulatorControlKeys.insert(key).inserted else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.performSimulatorControl(name: simulator.name, udid: simulator.udid, bundleIdentifier: bundleIdentifier)
+            DispatchQueue.main.async {
+                self.simulatorControlKeys.remove(key)
+                switch result {
+                case .opened:
+                    self.loadSimulators()
+                case .failed(let message):
+                    self.log(message, type: .error)
+                    self.deliverBanner(message)
+                }
+            }
+        }
+    }
+
+    private func performSimulatorControl(name: String, udid: String, bundleIdentifier: String?) -> SimulatorControlResult {
+        guard let plan = simulatorControlPlan(udid: udid, bundleIdentifier: bundleIdentifier) else {
+            return .failed("That simulator can't be opened from Simmer.")
+        }
+
+        switch runXcrun(plan.bootStatusArguments, timeout: simulatorBootTimeout) {
+        case .failure(.timedOut):
+            return .failed("Timed out waiting for \(name) to boot.")
+        case .failure(.launchFailed(let message)):
+            return .failed("Couldn't run simctl: \(message)")
+        case .success(let result) where result.status != 0:
+            return .failed(simctlFailureSummary(result.output, fallback: "Couldn't boot \(name)."))
+        case .success:
+            break
+        }
+
+        if let message = focusSimulatorApp(arguments: plan.focusArguments) {
+            return .failed(message)
+        }
+
+        guard let launchArguments = plan.launchArguments else { return .opened }
+        switch runXcrun(launchArguments, timeout: simulatorLaunchTimeout) {
+        case .failure(.timedOut):
+            return .failed("Timed out launching the app on \(name).")
+        case .failure(.launchFailed(let message)):
+            return .failed("Couldn't run simctl: \(message)")
+        case .success(let result) where result.status != 0:
+            return .failed(simctlFailureSummary(result.output, fallback: "Couldn't launch the app on \(name)."))
+        case .success:
+            return .opened
+        }
+    }
+
+    /// Asks Simulator.app to show this device. Arguments are ignored when Simulator
+    /// is already running, but a boot still makes that app open a window for the device.
+    private func focusSimulatorApp(arguments: [String]) -> String? {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: simulatorAppBundleIdentifier) else {
+            return "Couldn't find Simulator.app."
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.arguments = arguments
+        configuration.activates = true
+        let semaphore = DispatchSemaphore(value: 0)
+        var failure: String?
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            if let error {
+                failure = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 20) == .timedOut {
+            return "Timed out opening Simulator."
+        }
+        return failure
+    }
+
     func terminateRunningApp(_ app: App, on simulator: Simulator) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -1568,6 +1663,121 @@ func deviceRecordIsDeleted(_ deviceData: NSDictionary) -> Bool {
     if let deleted = deviceData["isDeleted"] as? Bool { return deleted }
     if let deleted = deviceData["isDeleted"] as? NSNumber { return deleted.boolValue }
     return false
+}
+
+let simulatorAppBundleIdentifier = "com.apple.iphonesimulator"
+let simulatorBootTimeout: TimeInterval = 180
+let simulatorLaunchTimeout: TimeInterval = 45
+
+enum SimulatorControlResult {
+    case opened
+    case failed(String)
+}
+
+struct SimulatorControlPlan: Equatable {
+    var bootStatusArguments: [String]
+    var focusArguments: [String]
+    var launchArguments: [String]?
+}
+
+func simulatorControlKey(udid: String, bundleIdentifier: String?) -> String {
+    if let bundleIdentifier, !bundleIdentifier.isEmpty {
+        return "\(udid):\(bundleIdentifier)"
+    }
+    return udid
+}
+
+func isSimulatorUDID(_ value: String) -> Bool {
+    UUID(uuidString: value) != nil
+}
+
+func isLaunchableBundleIdentifier(_ value: String) -> Bool {
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-")
+    guard !value.isEmpty, value.count <= 255 else { return false }
+    guard value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+    return !value.hasPrefix(".") && !value.hasPrefix("-") && !value.hasSuffix(".")
+}
+
+/// `bootstatus -b` boots a shut-down device and returns immediately when it is already booted.
+func simulatorControlPlan(udid: String, bundleIdentifier: String?) -> SimulatorControlPlan? {
+    guard isSimulatorUDID(udid) else { return nil }
+    if let bundleIdentifier {
+        guard isLaunchableBundleIdentifier(bundleIdentifier) else { return nil }
+    }
+    return SimulatorControlPlan(
+        bootStatusArguments: ["simctl", "bootstatus", udid, "-b"],
+        focusArguments: ["-CurrentDeviceUDID", udid],
+        launchArguments: bundleIdentifier.map { ["simctl", "launch", udid, $0] }
+    )
+}
+
+func simctlFailureSummary(_ output: String, fallback: String) -> String {
+    let line = output
+        .split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .last { !$0.isEmpty }
+    guard let line, !line.isEmpty else { return fallback }
+    if line.count <= 180 { return String(line) }
+    return String(line.prefix(177)) + "..."
+}
+
+enum SimctlRunError: Error {
+    case timedOut
+    case launchFailed(String)
+}
+
+struct SimctlRunResult {
+    var status: Int32
+    var output: String
+}
+
+func runXcrun(_ arguments: [String], timeout: TimeInterval) -> Result<SimctlRunResult, SimctlRunError> {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    process.arguments = arguments
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    let lock = NSLock()
+    var collected = Data()
+    let group = DispatchGroup()
+    for pipe in [stdout, stderr] {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            lock.lock()
+            collected.append(data)
+            lock.unlock()
+            group.leave()
+        }
+    }
+
+    do {
+        try process.run()
+    } catch {
+        process.terminate()
+        _ = group.wait(timeout: .now() + 2)
+        return .failure(.launchFailed(error.localizedDescription))
+    }
+
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.2)
+    }
+    if process.isRunning {
+        process.terminate()
+        process.waitUntilExit()
+        _ = group.wait(timeout: .now() + 2)
+        return .failure(.timedOut)
+    }
+    process.waitUntilExit()
+    _ = group.wait(timeout: .now() + 2)
+    lock.lock()
+    let output = String(data: collected, encoding: .utf8) ?? ""
+    lock.unlock()
+    return .success(SimctlRunResult(status: process.terminationStatus, output: output))
 }
 
 func simulatorIsBooted(at dataPath: String) -> Bool {

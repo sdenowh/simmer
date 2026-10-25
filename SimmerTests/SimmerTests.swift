@@ -24,6 +24,40 @@ struct RuntimeLabelTests {
     }
 }
 
+struct SimulatorControlPlanTests {
+    private let udid = "FD25CCC7-C964-41C4-A1B9-0B0915B71167"
+
+    @Test func openPlanBootsThenFocusesThatDevice() {
+        let plan = simulatorControlPlan(udid: udid, bundleIdentifier: nil)
+        #expect(plan?.bootStatusArguments == ["simctl", "bootstatus", udid, "-b"])
+        #expect(plan?.focusArguments == ["-CurrentDeviceUDID", udid])
+        #expect(plan?.launchArguments == nil)
+    }
+
+    @Test func launchPlanIncludesTheBundleIdentifier() {
+        let plan = simulatorControlPlan(udid: udid, bundleIdentifier: "com.apple.Preferences")
+        #expect(plan?.launchArguments == ["simctl", "launch", udid, "com.apple.Preferences"])
+        #expect(simulatorControlKey(udid: udid, bundleIdentifier: "com.apple.Preferences") == "\(udid):com.apple.Preferences")
+        #expect(simulatorControlKey(udid: udid, bundleIdentifier: nil) == udid)
+    }
+
+    @Test func rejectsIdentifiersThatCouldChangeTheCommand() {
+        #expect(simulatorControlPlan(udid: "mock-udid-1", bundleIdentifier: nil) == nil)
+        #expect(simulatorControlPlan(udid: udid, bundleIdentifier: "com.apple.App; rm") == nil)
+        #expect(simulatorControlPlan(udid: udid, bundleIdentifier: "-CurrentDeviceUDID") == nil)
+        #expect(isLaunchableBundleIdentifier("com.example.My-App") == true)
+    }
+
+    @Test func failureSummaryUsesTheLastLine() {
+        let output = """
+        An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):
+        Unable to boot device in current state: Booted
+        """
+        #expect(simctlFailureSummary(output, fallback: "Couldn't boot.") == "Unable to boot device in current state: Booted")
+        #expect(simctlFailureSummary("  \n", fallback: "Couldn't boot.") == "Couldn't boot.")
+    }
+}
+
 struct DevicePlistTests {
     @Test func deletedFlagAndBootState() throws {
         let root = try makeTempDirectory()

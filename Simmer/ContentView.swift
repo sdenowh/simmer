@@ -143,6 +143,7 @@ struct ContentView: View {
                                 ForEach(simulatorService.apps) { app in
                                     AppRowView(
                                         app: app,
+                                        simulator: simulator,
                                         isSelected: selectedApp?.id == app.id,
                                         onTap: {
                                             if selectedApp?.id == app.id {
@@ -151,7 +152,8 @@ struct ContentView: View {
                                                 selectedApp = app
                                                 simulatorService.loadSnapshots(for: app)
                                             }
-                                        }
+                                        },
+                                        simulatorService: simulatorService
                                     )
 
                                     if selectedApp?.id == app.id {
@@ -263,6 +265,112 @@ func presentSimmerAlert(message: String, window: NSWindow?) {
 }
 #endif
 
+struct RowContextMenuItem {
+    var title: String
+    var action: () -> Void
+}
+
+/// Presents an AppKit context menu on right-click without taking the left-click.
+/// SwiftUI's context menu never appears here: the row is a button inside a popover,
+/// so the right-click toggles the row instead of opening a menu.
+struct RowContextMenu: NSViewRepresentable {
+    var items: [RowContextMenuItem]
+
+    func makeNSView(context: Context) -> RowContextMenuAnchor {
+        RowContextMenuAnchor()
+    }
+
+    func updateNSView(_ nsView: RowContextMenuAnchor, context: Context) {
+        nsView.items = items
+    }
+}
+
+final class RowContextMenuAnchor: NSView {
+    var items: [RowContextMenuItem] = []
+    private var monitor: Any?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        pinToSuperview()
+    }
+
+    override func layout() {
+        super.layout()
+        pinToSuperview()
+    }
+
+    private func pinToSuperview() {
+        guard let superview else { return }
+        let target = superview.bounds
+        if frame != target {
+            frame = target
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeMonitor()
+        guard window != nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            guard self.shouldOpenMenu(for: event) else { return event }
+            self.openMenu(with: event)
+            return nil
+        }
+    }
+
+    deinit {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    private func removeMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    private func shouldOpenMenu(for event: NSEvent) -> Bool {
+        guard !items.isEmpty, let window, event.window === window else { return false }
+        let isContextClick = event.type == .rightMouseDown || event.modifierFlags.contains(.control)
+        guard isContextClick else { return false }
+        let local = convert(event.locationInWindow, from: nil)
+        return bounds.contains(local)
+    }
+
+    private func openMenu(with event: NSEvent) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (index, item) in items.enumerated() {
+            let menuItem = NSMenuItem(title: item.title, action: #selector(performItem(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.tag = index
+            menuItem.isEnabled = true
+            menu.addItem(menuItem)
+        }
+        // Pop the menu on the next turn. Doing it inside the right-click monitor
+        // makes AppKit treat that same click as a dismissal, so the menu never stays up.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window != nil else { return }
+            NotificationCenter.default.post(name: .simmerContextMenuWillOpen, object: nil)
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
+    }
+
+    @objc private func performItem(_ sender: NSMenuItem) {
+        guard items.indices.contains(sender.tag) else { return }
+        items[sender.tag].action()
+    }
+}
+
+extension Notification.Name {
+    static let simmerContextMenuWillOpen = Notification.Name("SimmerContextMenuWillOpen")
+}
+
 struct SimulatorRowView: View {
     let simulator: Simulator
     let isSelected: Bool
@@ -313,13 +421,20 @@ struct SimulatorRowView: View {
             .padding(.trailing, 4)
         }
         .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+        .background(RowContextMenu(items: [
+            RowContextMenuItem(title: "Open Simulator") {
+                simulatorService.openInSimulator(simulator)
+            }
+        ]))
     }
 }
 
 struct AppRowView: View {
     let app: App
+    let simulator: Simulator
     let isSelected: Bool
     let onTap: () -> Void
+    @ObservedObject var simulatorService: SimulatorService
     
     var body: some View {
         Button(action: onTap) {
@@ -354,6 +469,11 @@ struct AppRowView: View {
 
         }
         .buttonStyle(PlainButtonStyle())
+        .background(RowContextMenu(items: [
+            RowContextMenuItem(title: "Launch \(app.name)") {
+                simulatorService.launch(app, on: simulator)
+            }
+        ]))
     }
 }
 

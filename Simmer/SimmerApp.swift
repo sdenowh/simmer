@@ -42,6 +42,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popoverWindowProvider = PopoverWindowProvider()
     private var updaterController: SPUStandardUpdaterController?
     private var mcpHTTP: MCPHTTPServer?
+    private var outsideClickMonitors: [Any] = []
+    private var resignActiveObserver: NSObjectProtocol?
+    private var menuTrackingObservers: [NSObjectProtocol] = []
+    private var contextMenuIsOpen = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -142,22 +146,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func setupPopover() {
         popover = NSPopover()
         popover?.contentSize = NSSize(width: 320, height: 500)
-        popover?.behavior = .transient
+        // AppKit's transient behavior misses clicks in other apps while this agent
+        // is inactive (the panel stays stuck open) and swallows the click when it
+        // does dismiss. Dismissal is handled in startOutsideClickMonitoring().
+        popover?.behavior = .applicationDefined
         popover?.delegate = self
         let hostingController = NSHostingController(rootView: ContentView(appState: appState, simulatorService: simulatorService).environmentObject(popoverWindowProvider))
         // Force dark appearance for the popover content
         hostingController.view.appearance = NSAppearance(named: .darkAqua)
         popover?.contentViewController = hostingController
+        observeContextMenus()
         // Set window reference after popover is shown
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.popoverWindowProvider.window = hostingController.view.window
         }
     }
+
+    /// Menus resign key on the popover. If AppKit asks to close while one is
+    /// tracking, keep the popover up so the menu can finish.
+    private func observeContextMenus() {
+        let center = NotificationCenter.default
+        menuTrackingObservers = [
+            center.addObserver(forName: .simmerContextMenuWillOpen, object: nil, queue: .main) { [weak self] _ in
+                self?.contextMenuIsOpen = true
+            },
+            center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.contextMenuIsOpen = true
+            },
+            center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.contextMenuIsOpen = false
+            }
+        ]
+    }
     
     @objc private func togglePopover() {
         if let button = statusItem?.button {
             if popover?.isShown == true {
-                popover?.performClose(nil)
+                closePopover()
             } else {
                 popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 // Set window reference after popover is shown
@@ -171,11 +196,166 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             }
         }
     }
+
+    private func closePopover() {
+        guard popover?.isShown == true else { return }
+        // close() still dismisses when a sheet or menu is attached. performClose
+        // bails out in those cases, and it also consults popoverShouldClose, which
+        // intentionally vetoes the right-click that opens a context menu.
+        popover?.close()
+    }
+
+    /// Closes the popover on an outside click without consuming that click.
+    /// Global monitors only observe events posted to other apps, so the click still lands.
+    private func startOutsideClickMonitoring() {
+        stopOutsideClickMonitoring()
+
+        let mouseDown: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mouseDown, handler: { [weak self] event in
+            // Delivered only for other apps, and only as a copy, so the click still lands.
+            // Ignore the status item: that click is the toggle, and closing here would
+            // make the subsequent mouse-up open the popover again.
+            guard let self, !(event.type == .leftMouseDown && self.eventHitsStatusItem(event)) else { return }
+            DispatchQueue.main.async {
+                self.closePopover()
+            }
+        }) {
+            outsideClickMonitors.append(monitor)
+        }
+
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: mouseDown, handler: { [weak self] event in
+            guard let self else { return event }
+            if self.shouldDismissPopover(for: event) {
+                // Close after this event is dispatched so the click reaches its target.
+                DispatchQueue.main.async {
+                    self.closePopover()
+                }
+            }
+            return event
+        }) {
+            outsideClickMonitors.append(monitor)
+        }
+
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] event in
+            guard let self, self.shouldClosePopover(forEscape: event) else { return event }
+            self.closePopover()
+            return nil
+        }) {
+            outsideClickMonitors.append(monitor)
+        }
+
+        // Subscribe next turn so a resign posted while the popover is being shown
+        // does not immediately dismiss it. Keyboard app switches have no click to pass through.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.popover?.isShown == true, self.resignActiveObserver == nil else { return }
+            self.resignActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, !self.contextMenuIsOpen else { return }
+                self.closePopover()
+            }
+        }
+    }
+
+    private func stopOutsideClickMonitoring() {
+        for monitor in outsideClickMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        outsideClickMonitors.removeAll()
+        if let resignActiveObserver {
+            NotificationCenter.default.removeObserver(resignActiveObserver)
+            self.resignActiveObserver = nil
+        }
+    }
+
+    private func shouldDismissPopover(for event: NSEvent) -> Bool {
+        if contextMenuIsOpen { return false }
+        // The status item action toggles on left mouse up. Dismissing on mouse down
+        // would close the popover and then the action would open it again.
+        if event.type == .leftMouseDown, eventHitsStatusItem(event) {
+            return false
+        }
+        guard let window = event.window else { return true }
+        // Menu tracking usually consumes its own clicks. If one reaches us, leave it alone.
+        if window.level == .popUpMenu {
+            return false
+        }
+        return !isPopoverWindow(window)
+    }
+
+    private func shouldClosePopover(forEscape event: NSEvent) -> Bool {
+        guard event.keyCode == 53 else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+        guard flags.isEmpty else { return false }
+        guard let popoverWindow = popover?.contentViewController?.view.window,
+              popoverWindow.isKeyWindow,
+              popoverWindow.sheets.isEmpty else {
+            return false
+        }
+        return true
+    }
+
+    private func eventHitsStatusItem(_ event: NSEvent) -> Bool {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return false }
+        if event.window === buttonWindow {
+            return true
+        }
+        let screenPoint = screenLocation(of: event)
+        let buttonRect = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        return buttonRect.contains(screenPoint)
+    }
+
+    private func screenLocation(of event: NSEvent) -> NSPoint {
+        guard let window = event.window else { return event.locationInWindow }
+        return window.convertPoint(toScreen: event.locationInWindow)
+    }
+
+    private func popoverWindows() -> [NSWindow] {
+        guard let popoverWindow = popover?.contentViewController?.view.window else { return [] }
+        var windows = [popoverWindow]
+        windows.append(contentsOf: popoverWindow.sheets)
+        if let children = popoverWindow.childWindows {
+            windows.append(contentsOf: children)
+        }
+        return windows
+    }
+
+    private func isPopoverWindow(_ window: NSWindow) -> Bool {
+        let roots = popoverWindows()
+        var current: NSWindow? = window
+        var seen = Set<ObjectIdentifier>()
+        while let candidate = current {
+            if roots.contains(where: { $0 === candidate }) {
+                return true
+            }
+            if !seen.insert(ObjectIdentifier(candidate)).inserted {
+                return false
+            }
+            current = candidate.sheetParent ?? candidate.parent
+        }
+        return false
+    }
     
     // MARK: - NSPopoverDelegate
     
+    func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        if contextMenuIsOpen { return false }
+        if let event = NSApp.currentEvent {
+            switch event.type {
+            case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+                return false
+            default:
+                break
+            }
+        }
+        return true
+    }
+
     func popoverDidShow(_ notification: Notification) {
         appState.popoverAppearanceCount += 1
+        startOutsideClickMonitoring()
         if let window = popover?.contentViewController?.view.window {
             popoverWindowProvider.window = window
             window.appearance = NSAppearance(named: .darkAqua)
@@ -187,5 +367,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             simulatorService.loadApps(for: selectedSimulator)
             simulatorService.refreshSelectedAppDiskUsage()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitoring()
     }
 }

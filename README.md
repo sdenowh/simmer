@@ -1,6 +1,6 @@
 # Simmer
 
-A macOS menubar app for iOS Simulator management. Quickly browse simulators, inspect installed apps, open Documents folders, and snapshot/restore app data. Version 2.0 adds a local MCP server so an agent can do the same.
+A macOS menubar app for iOS Simulator management. Quickly browse simulators, inspect installed apps, open Documents folders, and snapshot/restore app data. Version 2.0 adds a local MCP server so an agent can do the same. Version 2.1 can boot a simulator or launch an app from a right-click, without opening Xcode.
 
 <p align="center">
   <img src="screenshot.png" alt="App screenshot" width="321" height="502">
@@ -11,10 +11,12 @@ A macOS menubar app for iOS Simulator management. Quickly browse simulators, ins
 - **Simulator overview**
   - Recently used simulators with name, iOS version, and device icon
   - Pin/unpin for quick access
+  - Right-click a simulator and choose **Open in Simulator** to boot it and bring Simulator to the front
 
 - **Installed apps per simulator**
   - App list with icons and names
   - Automatic refresh and path revalidation when apps are reinstalled
+  - Right-click an app and choose **Launch App** to open it, booting the simulator first if it is shut down
 
 - **Documents folder tools**
   - Open an app's Documents directory in Finder
