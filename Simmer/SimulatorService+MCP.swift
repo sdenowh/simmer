@@ -70,15 +70,18 @@ extension SimulatorService: MCPBackend {
             if !FileManager.default.fileExists(atPath: app.snapshotsPath) {
                 try FileManager.default.createDirectory(atPath: app.snapshotsPath, withIntermediateDirectories: true)
             }
-            try captureDocumentsSnapshot(
+            try captureAppSnapshot(
                 documentsPath: app.documentsPath,
+                bundleIdentifier: app.bundleIdentifier,
                 snapshotPath: snapshotPath,
+                bootedUDID: simulatorIsBooted(at: device.dataPath) ? device.udid : nil,
                 onProgress: { message, fraction in
                     self.noteSnapshotProgress(message: message, fraction: fraction)
                 },
                 onRetry: { _, error in
                     self.showSnapshotProgress("Temporary problem (\(error.localizedDescription)). Retrying snapshot...", progress: 0)
-                }
+                },
+                onWarning: { self.log($0) }
             )
             if !trimmedName.isEmpty {
                 let metadata = SnapshotMetadata(displayName: trimmedName)
@@ -126,7 +129,6 @@ extension SimulatorService: MCPBackend {
         guard let record = records.first(where: { $0.id == snapshotId }) else {
             throw MCPBackendError(message: "No snapshot matches \"\(snapshot)\" for \(app.name).")
         }
-        let snapshotDocuments = (record.path as NSString).appendingPathComponent("Documents")
         guard tryBeginSnapshotOperation() else {
             throw MCPBackendError(message: "A snapshot operation is already in progress.")
         }
@@ -135,10 +137,12 @@ extension SimulatorService: MCPBackend {
         showSnapshotProgress("Preparing to restore snapshot...", progress: 0)
         terminateRunningApp(app, on: device)
         do {
-            try restoreDocumentsReplacingLiveCopy(
-                snapshotDocumentsPath: snapshotDocuments,
+            try restoreAppSnapshot(
+                snapshotPath: record.path,
                 documentsPath: app.documentsPath,
+                bundleIdentifier: app.bundleIdentifier,
                 simulatorRoot: device.dataPath,
+                bootedUDID: simulatorIsBooted(at: device.dataPath) ? device.udid : nil,
                 onProgress: { message, fraction in
                     self.noteSnapshotProgress(message: message, fraction: fraction)
                 },

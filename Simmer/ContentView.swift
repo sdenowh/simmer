@@ -551,7 +551,7 @@ struct AppActionsView: View {
                             .foregroundColor(snapshotBusy ? .secondary : .green)
                             .frame(width: 20)
                         
-                        Text("Take Documents Snapshot")
+                        Text("Take Snapshot")
                             .font(.system(size: 12))
                             .foregroundColor(snapshotBusy ? .secondary : .primary)
                         
@@ -860,7 +860,11 @@ struct SnapshotRowView: View {
         let dateFormatter = DateFormatter()
         dateFormatter.dateStyle = .medium
         let formattedDate = dateFormatter.string(from: snapshot.date)
-        alert.informativeText = "This will replace the current Documents folder with the snapshot from \(formattedDate). This action cannot be undone."
+        if userDefaultsSnapshotIsPresent(at: snapshot.path) {
+            alert.informativeText = "This replaces the current Documents folder and the app's settings with the snapshot from \(formattedDate). This cannot be undone."
+        } else {
+            alert.informativeText = "This replaces the current Documents folder with the snapshot from \(formattedDate). This snapshot does not include settings. This cannot be undone."
+        }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Restore")
         alert.addButton(withTitle: "Cancel")

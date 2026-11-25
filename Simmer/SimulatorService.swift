@@ -40,7 +40,7 @@ class SimulatorService: ObservableObject {
         loadSimulators() // Reload with new data
     }
     
-    private func log(_ message: String, type: OSLogType = .default) {
+    func log(_ message: String, type: OSLogType = .default) {
         // Use NSLog for release builds to ensure visibility in Console.app
         #if DEBUG
         logger.log(level: type, "\(message)")
@@ -1152,6 +1152,7 @@ class SimulatorService: ObservableObject {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let snapshotName = "snapshot_\(timestamp)"
         let snapshotPath = (validatedApp.snapshotsPath as NSString).appendingPathComponent(snapshotName)
+        let settingsSimulator = selectedSimulator
 
         log("Taking snapshot for \(validatedApp.name) at \(snapshotPath)")
         beginCriticalFileOperation()
@@ -1165,9 +1166,15 @@ class SimulatorService: ObservableObject {
                 if !FileManager.default.fileExists(atPath: validatedApp.snapshotsPath) {
                     try FileManager.default.createDirectory(atPath: validatedApp.snapshotsPath, withIntermediateDirectories: true)
                 }
-                try captureDocumentsSnapshot(
+                let bootedUDID = settingsSimulator.flatMap { simulator -> String? in
+                    guard simulatorIsBooted(at: simulator.dataPath) else { return nil }
+                    return simulator.udid
+                }
+                try captureAppSnapshot(
                     documentsPath: validatedApp.documentsPath,
+                    bundleIdentifier: validatedApp.bundleIdentifier,
                     snapshotPath: snapshotPath,
+                    bootedUDID: bootedUDID,
                     onProgress: { message, fraction in
                         self.noteSnapshotProgress(message: message, fraction: fraction)
                     },
@@ -1178,7 +1185,8 @@ class SimulatorService: ObservableObject {
                             self.snapshotOperationMessage = "Temporary problem (\(error.localizedDescription)). Retrying snapshot..."
                         }
                         self.log("Snapshot attempt \(attempt) failed: \(error). Retrying.")
-                    }
+                    },
+                    onWarning: { self.log($0) }
                 )
                 DispatchQueue.main.async {
                     self.loadSnapshots(for: validatedApp)
@@ -1238,16 +1246,19 @@ class SimulatorService: ObservableObject {
                 DispatchQueue.main.async { self.endCriticalFileOperation() }
             }
             self.terminateRunningApp(validatedApp, on: simulator)
-            self.performRestore(snapshotDocumentsPath: snapshotDocumentsPath, app: validatedApp, simulator: simulator)
+            self.performRestore(snapshotPath: snapshot.path, app: validatedApp, simulator: simulator)
         }
     }
 
-    private func performRestore(snapshotDocumentsPath: String, app: App, simulator: Simulator) {
+    private func performRestore(snapshotPath: String, app: App, simulator: Simulator) {
         do {
-            try restoreDocumentsReplacingLiveCopy(
-                snapshotDocumentsPath: snapshotDocumentsPath,
+            let bootedUDID = simulatorIsBooted(at: simulator.dataPath) ? simulator.udid : nil
+            try restoreAppSnapshot(
+                snapshotPath: snapshotPath,
                 documentsPath: app.documentsPath,
+                bundleIdentifier: app.bundleIdentifier,
                 simulatorRoot: simulator.dataPath,
+                bootedUDID: bootedUDID,
                 onProgress: { message, fraction in
                     self.noteSnapshotProgress(message: message, fraction: fraction)
                 },
@@ -1730,6 +1741,7 @@ enum SimctlRunError: Error {
 struct SimctlRunResult {
     var status: Int32
     var output: String
+    var stdout: Data = Data()
 }
 
 func runXcrun(_ arguments: [String], timeout: TimeInterval) -> Result<SimctlRunResult, SimctlRunError> {
@@ -1742,18 +1754,25 @@ func runXcrun(_ arguments: [String], timeout: TimeInterval) -> Result<SimctlRunR
     process.standardError = stderr
 
     let lock = NSLock()
-    var collected = Data()
+    var outData = Data()
+    var errData = Data()
     let group = DispatchGroup()
-    for pipe in [stdout, stderr] {
+    func collect(_ pipe: Pipe, asStandardOutput: Bool) {
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             lock.lock()
-            collected.append(data)
+            if asStandardOutput {
+                outData.append(data)
+            } else {
+                errData.append(data)
+            }
             lock.unlock()
             group.leave()
         }
     }
+    collect(stdout, asStandardOutput: true)
+    collect(stderr, asStandardOutput: false)
 
     do {
         try process.run()
@@ -1776,9 +1795,14 @@ func runXcrun(_ arguments: [String], timeout: TimeInterval) -> Result<SimctlRunR
     process.waitUntilExit()
     _ = group.wait(timeout: .now() + 2)
     lock.lock()
-    let output = String(data: collected, encoding: .utf8) ?? ""
+    let standardOutput = outData
+    let standardError = errData
     lock.unlock()
-    return .success(SimctlRunResult(status: process.terminationStatus, output: output))
+    let output = [standardOutput, standardError]
+        .compactMap { String(data: $0, encoding: .utf8) }
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
+    return .success(SimctlRunResult(status: process.terminationStatus, output: output, stdout: standardOutput))
 }
 
 func simulatorIsBooted(at dataPath: String) -> Bool {
@@ -1848,6 +1872,14 @@ func isTransientSnapshotError(_ error: Error) -> Bool {
 func restoreFailureMessage(_ error: Error) -> String {
     if let failure = error as? SnapshotFileFailure, case .rollbackFailed = failure {
         return failure.localizedDescription
+    }
+    if let failure = error as? UserDefaultsSnapshotFailure {
+        switch failure {
+        case .documentsRestoreFailedAfterSettings, .settingsRollbackFailed:
+            return failure.localizedDescription
+        default:
+            return "\(failure.localizedDescription) Documents were left unchanged."
+        }
     }
     return "\(error.localizedDescription) The original Documents folder was kept."
 }

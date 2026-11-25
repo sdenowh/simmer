@@ -23,7 +23,7 @@ A macOS menubar app for iOS Simulator management. Quickly browse simulators, ins
   - Live size readout for Documents
 
 - **Snapshots for app data**
-  - Take, restore, rename, and delete snapshots of Documents
+  - Take, restore, rename, and delete snapshots of Documents and the app's settings
   - Restore validation, retry logic, and progress feedback
   - Delete all snapshots with total size shown
 
@@ -35,7 +35,7 @@ A macOS menubar app for iOS Simulator management. Quickly browse simulators, ins
   - Sparkle integration for update checks from the menu
 
 - **MCP for agents**
-  - Create and restore Documents snapshots
+  - Create and restore snapshots of Documents and the app's settings
   - Send a push notification to a booted simulator
   - Loopback server while Simmer is running, or a stdio server via `--mcp`
 
@@ -74,12 +74,12 @@ Tools:
 | --- | --- |
 | `list_simulators` | Simulators that have apps installed |
 | `list_apps` | Apps on one simulator |
-| `list_snapshots` | Documents snapshots for an app |
-| `create_snapshot` | Copy Documents into a new snapshot |
-| `restore_snapshot` | Quit the app and replace Documents with a snapshot |
+| `list_snapshots` | Snapshots for an app |
+| `create_snapshot` | Copy Documents and the app's settings into a new snapshot |
+| `restore_snapshot` | Quit the app and replace Documents and settings with a snapshot |
 | `send_push_notification` | Deliver an APNs payload with `simctl push` |
 
-`restore_snapshot` removes the current Documents folder after the copied files match the snapshot. `send_push_notification` requires a booted simulator. Pass a UDID and bundle id, or a simulator and app name when that name is unique.
+`restore_snapshot` removes the current Documents folder after the copied files match the snapshot, and restores the app's settings when that snapshot includes them. Snapshots made before settings were saved restore Documents only. `send_push_notification` requires a booted simulator. Pass a UDID and bundle id, or a simulator and app name when that name is unique.
 
 ## Download
 

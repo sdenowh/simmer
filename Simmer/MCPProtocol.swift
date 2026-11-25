@@ -14,7 +14,7 @@ enum MCPProcess {
 enum SimmerMCPConfig {
     static let port: UInt16 = 8787
     static let endpointPath = "/mcp"
-    static let instructions = "Simmer manages iOS Simulator app data. List simulators, then apps, then snapshots. create_snapshot copies Documents and leaves the live folder unchanged. restore_snapshot terminates the app and replaces its Documents folder. send_push_notification delivers an APNs payload to a booted simulator."
+    static let instructions = "Simmer manages iOS Simulator app data. List simulators, then apps, then snapshots. create_snapshot copies Documents and the app's settings, and leaves the live data unchanged. restore_snapshot terminates the app, restores settings when the snapshot has them, and replaces its Documents folder. send_push_notification delivers an APNs payload to a booted simulator."
 
     static var httpURL: String { "http://127.0.0.1:\(port)\(endpointPath)" }
 
@@ -342,7 +342,7 @@ enum MCPDispatcher {
             ),
             tool(
                 "list_snapshots",
-                "List Documents snapshots for an app on a simulator.",
+                "List snapshots for an app on a simulator. A snapshot contains Documents and, for snapshots created by this version, the app's settings.",
                 required: ["simulator", "bundleId"],
                 properties: [
                     "simulator": stringProp("Simulator UDID or unique simulator name."),
@@ -351,7 +351,7 @@ enum MCPDispatcher {
             ),
             tool(
                 "create_snapshot",
-                "Copy an app's Documents folder into a new snapshot. The live Documents folder is left unchanged.",
+                "Copy an app's Documents folder and settings into a new snapshot. The live Documents folder and settings are left unchanged.",
                 required: ["simulator", "bundleId"],
                 properties: [
                     "simulator": stringProp("Simulator UDID or unique simulator name."),
@@ -361,7 +361,7 @@ enum MCPDispatcher {
             ),
             tool(
                 "restore_snapshot",
-                "Terminate the app and replace its live Documents folder with a snapshot. The previous Documents contents are removed after the copy is checked.",
+                "Terminate the app, restore its settings when the snapshot includes them, and replace its live Documents folder. The previous Documents contents are removed after the copy is checked. Older snapshots restore Documents only.",
                 required: ["simulator", "bundleId", "snapshot"],
                 properties: [
                     "simulator": stringProp("Simulator UDID or unique simulator name."),

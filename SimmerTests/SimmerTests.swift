@@ -499,6 +499,268 @@ struct SnapshotFileOperationTests {
         guard let name = names.first else { return }
         let copied = try String(contentsOf: snapshots.appendingPathComponent("\(name)/Documents/note.txt"), encoding: .utf8)
         #expect(copied == "keep")
+        var isDirectory: ObjCBool = false
+        let settings = snapshots.appendingPathComponent("\(name)/UserDefaults").path
+        #expect(FileManager.default.fileExists(atPath: settings, isDirectory: &isDirectory))
+        #expect(isDirectory.boolValue)
+    }
+}
+
+struct UserDefaultsSnapshotTests {
+    @Test func captureCopiesSettingsAndSkipsHiddenDomains() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "dark"]),
+            "com.example.suite": try preferencePlist(["cached": "yes"]),
+            ".GlobalPreferences": try preferencePlist(["hidden": "no"])
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/settings", isDirectory: true)
+
+        let source = try captureUserDefaultsSnapshot(
+            containerPath: fixture.container.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path
+        )
+
+        #expect(source == .files)
+        #expect(try preferenceDictionary(in: snapshot, domain: "com.example.app")["theme"] == "dark")
+        #expect(try preferenceDictionary(in: snapshot, domain: "com.example.suite")["cached"] == "yes")
+        #expect(FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("UserDefaults/.GlobalPreferences.plist").path) == false)
+    }
+
+    @Test func captureWithNoSettingsStillRecordsThatSettingsWereIncluded() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+
+        _ = try captureUserDefaultsSnapshot(
+            containerPath: fixture.container.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path
+        )
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "later"])
+        ], container: fixture.container)
+
+        try restoreUserDefaultsSnapshot(
+            snapshotPath: snapshot.path,
+            containerPath: fixture.container.path,
+            simulatorRoot: fixture.root.path,
+            bundleIdentifier: "com.example.app"
+        )
+
+        let plist = fixture.container.appendingPathComponent("Library/Preferences/com.example.app.plist")
+        #expect(FileManager.default.fileExists(atPath: plist.path) == false)
+    }
+
+    @Test func bootedReaderReplacesStaleFiles() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "light"]),
+            "com.example.suite": try preferencePlist(["cached": "stale"])
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/live", isDirectory: true)
+        let live = try preferencePlist(["theme": "dark"])
+
+        let source = try captureUserDefaultsSnapshot(
+            containerPath: fixture.container.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path,
+            readLiveDomain: { domain in
+                if domain == "com.example.app" { return .value(live) }
+                return .missing
+            }
+        )
+
+        #expect(source == .simulator)
+        #expect(try preferenceDictionary(in: snapshot, domain: "com.example.app")["theme"] == "dark")
+        #expect(FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("UserDefaults/com.example.suite.plist").path) == false)
+    }
+
+    @Test func unavailableLiveSettingsFallBackToThePlist() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "disk"])
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/fallback", isDirectory: true)
+
+        let source = try captureUserDefaultsSnapshot(
+            containerPath: fixture.container.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path,
+            readLiveDomain: { _ in .unavailable }
+        )
+
+        #expect(source == .files)
+        #expect(try preferenceDictionary(in: snapshot, domain: "com.example.app")["theme"] == "disk")
+    }
+
+    @Test func symlinkPreferenceIsNotCopied() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let outside = fixture.root.appendingPathComponent("outside.plist")
+        try preferencePlist(["secret": "no"]).write(to: outside, options: .atomic)
+        let preferences = fixture.container.appendingPathComponent("Library/Preferences", isDirectory: true)
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: preferences.appendingPathComponent("com.example.app.plist"),
+            withDestinationURL: outside
+        )
+        try "keep".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/link", isDirectory: true)
+
+        #expect(throws: UserDefaultsSnapshotFailure.unsafePreferencesPath) {
+            try captureAppSnapshot(
+                documentsPath: fixture.documents.path,
+                bundleIdentifier: "com.example.app",
+                snapshotPath: snapshot.path,
+                bootedUDID: nil
+            )
+        }
+        #expect(FileManager.default.fileExists(atPath: snapshot.path) == false)
+        #expect(try preferenceDictionary(at: outside)["secret"] == "no")
+    }
+
+    @Test func restoreReplacesSettingsAndDocuments() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try "before".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "before"])
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/full", isDirectory: true)
+        try captureAppSnapshot(
+            documentsPath: fixture.documents.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path,
+            bootedUDID: nil
+        )
+
+        try "after".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "after"]),
+            "com.example.suite": try preferencePlist(["cached": "extra"])
+        ], container: fixture.container)
+
+        try restoreAppSnapshot(
+            snapshotPath: snapshot.path,
+            documentsPath: fixture.documents.path,
+            bundleIdentifier: "com.example.app",
+            simulatorRoot: fixture.root.path,
+            bootedUDID: nil
+        )
+
+        let text = try String(contentsOf: fixture.documents.appendingPathComponent("note.txt"), encoding: .utf8)
+        #expect(text == "before")
+        #expect(try preferenceDictionary(in: fixture.container, domain: "com.example.app")["theme"] == "before")
+        let extra = fixture.container.appendingPathComponent("Library/Preferences/com.example.suite.plist")
+        #expect(FileManager.default.fileExists(atPath: extra.path) == false)
+        #expect(try preferenceDictionary(in: snapshot, domain: "com.example.app")["theme"] == "before")
+    }
+
+    @Test func olderSnapshotRestoresDocumentsWithoutChangingSettings() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try "keep".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "stay"])
+        ], container: fixture.container)
+        let snapshotDocuments = try makeSnapshotDocuments(in: fixture, named: "legacy", contents: "restored")
+
+        try restoreAppSnapshot(
+            snapshotPath: snapshotDocuments.deletingLastPathComponent().path,
+            documentsPath: fixture.documents.path,
+            bundleIdentifier: "com.example.app",
+            simulatorRoot: fixture.root.path,
+            bootedUDID: nil
+        )
+
+        let text = try String(contentsOf: fixture.documents.appendingPathComponent("note.txt"), encoding: .utf8)
+        #expect(text == "restored")
+        #expect(try preferenceDictionary(in: fixture.container, domain: "com.example.app")["theme"] == "stay")
+    }
+
+    @Test func unsafeContainerLeavesDocumentsAndSettingsAlone() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try "keep".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        try writeAppPreferences([
+            "com.example.app": try preferencePlist(["theme": "keep"])
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/safe", isDirectory: true)
+        try captureAppSnapshot(
+            documentsPath: fixture.documents.path,
+            bundleIdentifier: "com.example.app",
+            snapshotPath: snapshot.path,
+            bootedUDID: nil
+        )
+        try "changed".write(to: fixture.documents.appendingPathComponent("note.txt"), atomically: true, encoding: .utf8)
+        let elsewhere = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+
+        #expect(throws: UserDefaultsSnapshotFailure.unsafePreferencesPath) {
+            try restoreAppSnapshot(
+                snapshotPath: snapshot.path,
+                documentsPath: fixture.documents.path,
+                bundleIdentifier: "com.example.app",
+                simulatorRoot: elsewhere.path,
+                bootedUDID: nil
+            )
+        }
+        let text = try String(contentsOf: fixture.documents.appendingPathComponent("note.txt"), encoding: .utf8)
+        #expect(text == "changed")
+        #expect(try preferenceDictionary(in: fixture.container, domain: "com.example.app")["theme"] == "keep")
+        #expect(restoreFailureMessage(UserDefaultsSnapshotFailure.unsafePreferencesPath).contains("Documents were left unchanged"))
+    }
+
+    @Test func failedSettingsReplaceRollsBack() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let original = try preferencePlist(["theme": "old"])
+        let replacement = try preferencePlist(["theme": "new"])
+        let suite = try preferencePlist(["cached": "extra"])
+        try writeAppPreferences([
+            "com.example.app": original,
+            "com.example.suite": suite
+        ], container: fixture.container)
+        let snapshot = fixture.container.appendingPathComponent("Snapshots/rollback/UserDefaults", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try replacement.write(to: snapshot.appendingPathComponent("com.example.app.plist"), options: .atomic)
+
+        var store = ["com.example.app": original, "com.example.suite": suite]
+        #expect(throws: UserDefaultsSnapshotFailure.simulatorPreferencesUnavailable("nope")) {
+            try restoreUserDefaultsSnapshot(
+                snapshotPath: snapshot.deletingLastPathComponent().path,
+                containerPath: fixture.container.path,
+                simulatorRoot: fixture.root.path,
+                bundleIdentifier: "com.example.app",
+                readLiveDomain: { domain in
+                    guard let data = store[domain] else { return .missing }
+                    return .value(data)
+                },
+                replaceLiveDomain: { domain, data in
+                    if domain == "com.example.suite" {
+                        throw UserDefaultsSnapshotFailure.simulatorPreferencesUnavailable("nope")
+                    }
+                    if let data {
+                        store[domain] = data
+                    } else {
+                        store.removeValue(forKey: domain)
+                    }
+                }
+            )
+        }
+        #expect(store["com.example.app"] == original)
+        #expect(store["com.example.suite"] == suite)
+    }
+
+    @Test func invalidSimulatorIdentifierDoesNotSpawn() {
+        #expect(simctlExportPreference(udid: "not-a-udid", domain: "com.example.app") == .unavailable)
+        #expect(simctlExportPreference(udid: "FD25CCC7-C964-41C4-A1B9-0B0915B71167", domain: "../com.example") == .unavailable)
     }
 }
 
@@ -547,6 +809,35 @@ private func makeContainer() throws -> ContainerFixture {
     let documents = container.appendingPathComponent("Documents", isDirectory: true)
     try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
     return ContainerFixture(root: root, container: container, documents: documents)
+}
+
+private func preferencePlist(_ values: [String: String]) throws -> Data {
+    try PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0)
+}
+
+private func preferenceDictionary(at url: URL) throws -> [String: String] {
+    let data = try Data(contentsOf: url)
+    let object = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+    return object as? [String: String] ?? [:]
+}
+
+private func preferenceDictionary(in root: URL, domain: String) throws -> [String: String] {
+    let candidates = [
+        root.appendingPathComponent("UserDefaults/\(domain).plist"),
+        root.appendingPathComponent("Library/Preferences/\(domain).plist")
+    ]
+    guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+        return [:]
+    }
+    return try preferenceDictionary(at: url)
+}
+
+private func writeAppPreferences(_ files: [String: Data], container: URL) throws {
+    let directory = container.appendingPathComponent("Library/Preferences", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for (domain, data) in files {
+        try data.write(to: directory.appendingPathComponent("\(domain).plist"), options: .atomic)
+    }
 }
 
 private func makeSnapshotDocuments(in fixture: ContainerFixture, named name: String, contents: String) throws -> URL {
