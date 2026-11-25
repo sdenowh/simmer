@@ -1585,6 +1585,7 @@ class SimulatorService: ObservableObject {
 let snapshotTransientRetryLimit = 3
 let snapshotTransientRetryDelay: TimeInterval = 1
 private let snapshotTreeDepthLimit = 64
+let snapshotHashChunkBytes = 1024 * 1024
 
 struct ListedFile: Equatable {
     enum Kind: Equatable {
@@ -1880,17 +1881,95 @@ func retryingTransientSnapshot<T>(
     throw lastError ?? SnapshotFileFailure.validationFailed
 }
 
-private func hashFileContents(at path: String, onBytesRead: ((Int64) -> Void)? = nil) throws -> Data {
+private final class SnapshotHashBuffer {
+    var bytes = [UInt8](repeating: 0, count: snapshotHashChunkBytes)
+}
+
+/// Hashes a file through one reused buffer.
+///
+/// `FileHandle.read(upToCount:)` allocates a new `Data` for every read, and those
+/// objects stay alive until the walk finishes. Validating a restore reads the
+/// snapshot and the restored copy, so a large Documents folder was held in
+/// memory twice.
+private func hashFileContents(
+    at path: String,
+    buffer: SnapshotHashBuffer,
+    onBytesRead: ((Int64) -> Void)? = nil
+) throws -> Data {
     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
     defer { try? handle.close() }
+    let fd = handle.fileDescriptor
     var hasher = SHA256()
     while true {
-        let chunk = try handle.read(upToCount: 1024 * 1024)
-        guard let chunk, !chunk.isEmpty else { break }
-        hasher.update(data: chunk)
-        onBytesRead?(Int64(chunk.count))
+        let count = try buffer.bytes.withUnsafeMutableBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return 0 }
+            while true {
+                let readCount = Darwin.read(fd, base, raw.count)
+                if readCount > 0 { return readCount }
+                if readCount == 0 { return 0 }
+                let code = errno
+                if code == EINTR { continue }
+                throw snapshotPOSIXError(code == 0 ? EIO : code)
+            }
+        }
+        if count == 0 { break }
+        buffer.bytes.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(start: base, count: count))
+        }
+        onBytesRead?(Int64(count))
     }
     return Data(hasher.finalize())
+}
+
+private func listTreeItem(
+    fullPath: String,
+    relativePath: String,
+    hashContents: Bool,
+    hashBuffer: SnapshotHashBuffer?,
+    onBytesRead: ((Int64) -> Void)?
+) throws -> (file: ListedFile, isDirectory: Bool) {
+    let attributes: [FileAttributeKey: Any]
+    do {
+        attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
+    } catch {
+        throw SnapshotFileFailure.unreadableItem(relativePath)
+    }
+    let type = attributes[.type] as? FileAttributeType
+    if type == .typeSymbolicLink {
+        let target: String
+        do {
+            target = try FileManager.default.destinationOfSymbolicLink(atPath: fullPath)
+        } catch {
+            throw SnapshotFileFailure.unreadableItem(relativePath)
+        }
+        return (ListedFile(relativePath: relativePath, kind: .symlink(target: target)), false)
+    }
+    if type == .typeDirectory {
+        return (ListedFile(relativePath: relativePath, kind: .directory), true)
+    }
+    if type == .typeRegular {
+        let hash: Data?
+        if hashContents {
+            do {
+                guard let hashBuffer else { throw SnapshotFileFailure.unreadableItem(relativePath) }
+                hash = try hashFileContents(at: fullPath, buffer: hashBuffer, onBytesRead: onBytesRead)
+            } catch let failure as SnapshotFileFailure {
+                throw failure
+            } catch {
+                throw SnapshotFileFailure.unreadableItem(relativePath)
+            }
+        } else {
+            hash = nil
+        }
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return (
+            ListedFile(relativePath: relativePath, kind: .file(size: size, modified: modified, contentHash: hash)),
+            false
+        )
+    }
+    return (ListedFile(relativePath: relativePath, kind: .other), false)
 }
 
 /// Lists every entry under `path`. A name that cannot be inspected throws.
@@ -1902,59 +1981,30 @@ func fileTreeEntries(
     onEntry: ((ListedFile) -> Void)? = nil
 ) throws -> [ListedFile] {
     var files: [ListedFile] = []
+    let hashBuffer = hashContents ? SnapshotHashBuffer() : nil
     func enumerate(at currentPath: String, relativePath: String, depth: Int) throws {
         if depth > snapshotTreeDepthLimit {
             throw SnapshotFileFailure.unreadableItem(relativePath.isEmpty ? path : relativePath)
         }
-        let contents = try FileManager.default.contentsOfDirectory(atPath: currentPath)
+        let contents = try autoreleasepool {
+            try FileManager.default.contentsOfDirectory(atPath: currentPath)
+        }
         for item in contents {
             let fullPath = (currentPath as NSString).appendingPathComponent(item)
             let itemRelative = relativePath.isEmpty ? item : (relativePath as NSString).appendingPathComponent(item)
-            let attributes: [FileAttributeKey: Any]
-            do {
-                attributes = try FileManager.default.attributesOfItem(atPath: fullPath)
-            } catch {
-                throw SnapshotFileFailure.unreadableItem(itemRelative)
-            }
-            let type = attributes[.type] as? FileAttributeType
-            if type == .typeSymbolicLink {
-                let target: String
-                do {
-                    target = try FileManager.default.destinationOfSymbolicLink(atPath: fullPath)
-                } catch {
-                    throw SnapshotFileFailure.unreadableItem(itemRelative)
-                }
-                let listed = ListedFile(relativePath: itemRelative, kind: .symlink(target: target))
-                files.append(listed)
-                onEntry?(listed)
-            } else if type == .typeDirectory {
-                let listed = ListedFile(relativePath: itemRelative, kind: .directory)
-                files.append(listed)
-                onEntry?(listed)
-                try enumerate(at: fullPath, relativePath: itemRelative, depth: depth + 1)
-            } else if type == .typeRegular {
-                let hash: Data?
-                if hashContents {
-                    do {
-                        hash = try hashFileContents(at: fullPath, onBytesRead: onBytesRead)
-                    } catch {
-                        throw SnapshotFileFailure.unreadableItem(itemRelative)
-                    }
-                } else {
-                    hash = nil
-                }
-                let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-                let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-                let listed = ListedFile(
+            let listed = try autoreleasepool {
+                try listTreeItem(
+                    fullPath: fullPath,
                     relativePath: itemRelative,
-                    kind: .file(size: size, modified: modified, contentHash: hash)
+                    hashContents: hashContents,
+                    hashBuffer: hashBuffer,
+                    onBytesRead: onBytesRead
                 )
-                files.append(listed)
-                onEntry?(listed)
-            } else {
-                let listed = ListedFile(relativePath: itemRelative, kind: .other)
-                files.append(listed)
-                onEntry?(listed)
+            }
+            files.append(listed.file)
+            onEntry?(listed.file)
+            if listed.isDirectory {
+                try enumerate(at: fullPath, relativePath: itemRelative, depth: depth + 1)
             }
         }
     }

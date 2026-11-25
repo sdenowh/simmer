@@ -212,6 +212,23 @@ struct SnapshotFileOperationTests {
         #expect(try copiedTreeMatches(sourcePath: fixture.documents.path, copyPath: copy.path) == false)
     }
 
+    @Test func bytePastTheFirstHashChunkChangesTheResult() throws {
+        let fixture = try makeContainer()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var bytes = Data(repeating: 0x11, count: snapshotHashChunkBytes + 64)
+        bytes[snapshotHashChunkBytes + 3] = 0x22
+        try bytes.write(to: fixture.documents.appendingPathComponent("blob.bin"))
+        let copy = fixture.container.appendingPathComponent("copy", isDirectory: true)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
+        try bytes.write(to: copy.appendingPathComponent("blob.bin"))
+
+        #expect(try copiedTreeMatches(sourcePath: fixture.documents.path, copyPath: copy.path))
+
+        bytes[snapshotHashChunkBytes + 3] = 0x33
+        try bytes.write(to: copy.appendingPathComponent("blob.bin"))
+        #expect(try copiedTreeMatches(sourcePath: fixture.documents.path, copyPath: copy.path) == false)
+    }
+
     @Test func missingFileIsNotAMatch() throws {
         let fixture = try makeContainer()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
