@@ -3,12 +3,12 @@
     <channel>
         <title>Simmer</title>
         <item>
-            <title>2.1.1</title>
-            <pubDate>Wed, 25 Nov 2026 15:53:17 +0000</pubDate>
-            <sparkle:version>51</sparkle:version>
-            <sparkle:shortVersionString>2.1.1</sparkle:shortVersionString>
+            <title>2.1.2</title>
+            <pubDate>Wed, 25 Nov 2026 16:31:54 +0000</pubDate>
+            <sparkle:version>52</sparkle:version>
+            <sparkle:shortVersionString>2.1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.2</sparkle:minimumSystemVersion>
-            <enclosure url="https://sdenowh.github.io/simmer/simmer/Simmer.app.zip" length="2090750" type="application/octet-stream" sparkle:edSignature="klME7KAYi7OdxPvjgItIkaszXM9ynFPfTc1dvY6uCaV1Wvv5YoPLC2JrWIwsRtCM9+8M18/anlF2DE7vCPIrBA=="/>
+            <enclosure url="https://sdenowh.github.io/simmer/simmer/Simmer.app.zip" length="2125640" type="application/octet-stream" sparkle:edSignature="mgNIRYz2jiCmJBcqiCt1QyMvc0FJoUtYfkUXVn/L7I7ZJPb6MUkSzNRVBC7pLwff9POTmVbq0Jc9WFkrK4gRDw=="/>
         </item>
     </channel>
 </rss>
